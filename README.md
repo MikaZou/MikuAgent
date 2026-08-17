@@ -4,13 +4,13 @@
 
 ## 📸 运行截图
 
-<p align="center">
-  <img src="docs/screenshots/web.png" alt="Web 浏览器版运行截图" width="560"><br>
-  <sub>Web 浏览器版</sub>
-  <br><br>
-  <img src="docs/screenshots/pet.png" alt="透明桌宠窗口版运行截图" width="320"><br>
-  <sub>透明桌宠窗口版（置顶、可拖拽）</sub>
-</p>
+### 透明桌宠窗口版
+
+![透明桌宠窗口版](docs/screenshots/pet.png)
+
+### Web 浏览器版
+
+![Web 浏览器版](docs/screenshots/web.png)
 
 ## 📥 新电脑安装（2 分钟上手）
 
