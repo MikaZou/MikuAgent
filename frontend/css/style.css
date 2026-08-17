@@ -263,6 +263,10 @@ body.pet-mode #btn-close {
 
 /* ===== 语音输入：按住说话按钮 ===== */
 .mic-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
   flex: none;
   width: 38px;
   height: 38px;

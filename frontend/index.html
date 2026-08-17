@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>MikuAgent · 初音未来桌宠</title>
-  <link rel="stylesheet" href="/css/style.css">
+  <link rel="stylesheet" href="/css/style.css?v=2">
 </head>
 <body>
   <!-- 桌宠主体：Live2D 为主要部分，悬停时在下方显示输入栏 -->
@@ -20,7 +20,14 @@
 
     <div id="quick-input">
       <input id="input-box" type="text" placeholder="和 Miku 说点什么吧…" autocomplete="off" maxlength="2000">
-      <button id="btn-mic" class="mic-btn" title="按住说话">🎤</button>
+      <button id="btn-mic" class="mic-btn" title="按住说话" aria-label="按住说话">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+          <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+          <line x1="12" y1="19" x2="12" y2="23"></line>
+          <line x1="8" y1="23" x2="16" y2="23"></line>
+        </svg>
+      </button>
       <button id="btn-send">发送</button>
     </div>
   </div>
@@ -34,7 +41,7 @@
   <script src="/vendor/pixi.min.js"></script>
   <script src="/vendor/live2dcubismcore.min.js"></script>
   <script src="/vendor/cubism4.min.js"></script>
-  <script src="/js/live2d.js"></script>
-  <script src="/js/app.js"></script>
+  <script src="/js/live2d.js?v=2"></script>
+  <script src="/js/app.js?v=2"></script>
 </body>
 </html>
