@@ -1,0 +1,108 @@
+{
+	"Version": 3,
+	"FileReferences": {
+		"Moc": "MIKU.moc3",
+		"Textures": [
+			"MIKU.4096/texture_00.png"
+		],
+		"Physics": "MIKU.physics3.json",
+		"DisplayInfo": "MIKU.cdi3.json",
+		"Expressions": [
+			{
+				"Name": "Chijing",
+				"File": "表情和动作/Chijing.exp3.json"
+			},
+			{
+				"Name": "Dazhihui",
+				"File": "表情和动作/Dazhihui.exp3.json"
+			},
+			{
+				"Name": "Mimiyan",
+				"File": "表情和动作/Mimiyan.exp3.json"
+			},
+			{
+				"Name": "Saihong",
+				"File": "表情和动作/Saihong.exp3.json"
+			},
+			{
+				"Name": "Yanjing",
+				"File": "表情和动作/Yanjing.exp3.json"
+			},
+			{
+				"Name": "liuhan",
+				"File": "表情和动作/liuhan.exp3.json"
+			}
+		],
+		"Motions": {
+			"Idle": [
+				{
+					"File": "表情和动作/07_点头.motion3.json"
+				},
+				{
+					"File": "表情和动作/14_点头.motion3.json"
+				},
+				{
+					"File": "表情和动作/09_渐入睡眠.motion3.json"
+				}
+			],
+			"Tap": [
+				{
+					"File": "表情和动作/02_高兴.motion3.json"
+				},
+				{
+					"File": "表情和动作/04_开心.motion3.json"
+				},
+				{
+					"File": "表情和动作/11_装可爱.motion3.json"
+				}
+			],
+			"Flick": [
+				{
+					"File": "表情和动作/01_生气.motion3.json"
+				},
+				{
+					"File": "表情和动作/10_愤怒.motion3.json"
+				}
+			],
+			"FlickUp": [
+				{
+					"File": "表情和动作/05_转头.motion3.json"
+				}
+			],
+			"Cry": [
+				{
+					"File": "表情和动作/06_大哭.motion3.json"
+				}
+			],
+			"Dance": [
+				{
+					"File": "表情和动作/08_走路.motion3.json"
+				},
+				{
+					"File": "表情和动作/12_活动身体.motion3.json"
+				},
+				{
+					"File": "表情和动作/13_扭腰.motion3.json"
+				}
+			]
+		}
+	},
+	"Groups": [
+		{
+			"Target": "Parameter",
+			"Name": "EyeBlink",
+			"Ids": [
+				"PARAM_EYE_L_OPEN",
+				"PARAM_EYE_R_OPEN"
+			]
+		},
+		{
+			"Target": "Parameter",
+			"Name": "LipSync",
+			"Ids": [
+				"ParamMouthOpenY"
+			]
+		}
+	],
+	"HitAreas": []
+}

@@ -1,0 +1,370 @@
+/* ===== MikuAgent 初音未来桌宠样式（悬停输入形态） ===== */
+:root {
+  --miku-teal: #39c5bb;
+  --miku-pink: #ff6fa5;
+  --miku-blue: #4a90e2;
+  --text-main: #2b3445;
+  --text-sub: #7b8798;
+  --shadow: 0 12px 32px rgba(10, 20, 40, 0.35);
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", sans-serif;
+  background: radial-gradient(circle at 50% 30%, rgba(57, 197, 187, 0.22), transparent 60%),
+    radial-gradient(circle at 50% 85%, rgba(255, 111, 165, 0.16), transparent 55%),
+    linear-gradient(180deg, #1b2233 0%, #10151f 100%);
+  user-select: none;
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+  border: none;
+  outline: none;
+}
+
+/* ===== 桌宠主体：Live2D 居中为主，输入栏在其下方 ===== */
+#pet {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  padding-bottom: 18px;
+}
+
+/* ===== Live2D 舞台 ===== */
+#miku-stage {
+  position: relative;
+  width: min(420px, 84vw, calc((100vh - 110px) * 0.75));
+  height: min(560px, calc(100vh - 110px));
+  cursor: grab;
+}
+
+#miku-stage:active {
+  cursor: grabbing;
+}
+
+#live2d-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+#miku-fallback {
+  position: absolute;
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  height: 92%;
+  max-width: 96%;
+  object-fit: contain;
+  filter: drop-shadow(0 6px 18px rgba(0, 0, 0, 0.4));
+  animation: float 3.2s ease-in-out infinite;
+}
+
+@keyframes float {
+  0%, 100% { transform: translateX(-50%) translateY(0); }
+  50% { transform: translateX(-50%) translateY(-10px); }
+}
+
+/* ===== 说话气泡 ===== */
+#speech-bubble {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 320px;
+  max-height: 120px;
+  overflow-y: auto;
+  padding: 12px 16px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.95);
+  color: var(--text-main);
+  font-size: 14px;
+  line-height: 1.6;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+  word-break: break-word;
+  white-space: pre-wrap;
+  animation: bubble-in 0.25s ease-out;
+  user-select: text;
+  cursor: default;
+}
+
+#speech-bubble::after {
+  content: "";
+  position: absolute;
+  bottom: -9px;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 9px solid transparent;
+  border-top-color: rgba(255, 255, 255, 0.95);
+  border-bottom: none;
+}
+
+@keyframes bubble-in {
+  from { opacity: 0; transform: translateX(-50%) translateY(8px) scale(0.96); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
+}
+
+.typing-dots {
+  display: inline-flex;
+  gap: 5px;
+  padding: 4px 0;
+}
+
+.typing-dots span {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--miku-teal);
+  animation: typing 1.2s infinite ease-in-out;
+}
+
+.typing-dots span:nth-child(2) { animation-delay: 0.2s; }
+.typing-dots span:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes typing {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+  30% { transform: translateY(-5px); opacity: 1; }
+}
+
+.emotion-chip {
+  display: inline-block;
+  margin-right: 6px;
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(57, 197, 187, 0.16);
+  color: #168f86;
+  vertical-align: 1px;
+}
+
+/* ===== 设置按钮（悬停时出现） ===== */
+.corner-btn {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  font-size: 17px;
+  color: #fff;
+  background: rgba(20, 26, 38, 0.55);
+  backdrop-filter: blur(6px);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s;
+  z-index: 10;
+}
+
+/* 桌宠控制按钮：放在舞台左上角（设置按钮在右上角） */
+#btn-minimize,
+#btn-close {
+  display: none;
+  top: 12px;
+  right: auto;
+  left: 12px;
+  font-size: 16px;
+}
+
+body.pet-mode #btn-minimize,
+body.pet-mode #btn-close {
+  display: block;
+}
+
+#btn-close {
+  left: 52px;
+  background: rgba(239, 68, 68, 0.75);
+}
+
+#btn-close:hover {
+  background: #ef4444;
+}
+
+#miku-stage:hover .corner-btn {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.corner-btn:hover {
+  background: var(--miku-teal);
+}
+
+/* ===== 输入栏（默认隐藏，悬停 Miku 时在下方出现） ===== */
+#quick-input {
+  display: flex;
+  gap: 8px;
+  width: 380px;
+  padding: 10px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: var(--shadow);
+  opacity: 0;
+  transform: translateY(10px);
+  pointer-events: none;
+  transition: opacity 0.22s ease, transform 0.22s ease;
+}
+
+#pet:hover #quick-input,
+#quick-input.show {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+#input-box {
+  flex: 1;
+  padding: 10px 14px;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 11px;
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.15s;
+  user-select: text;
+}
+
+#input-box:focus {
+  border-color: var(--miku-teal);
+  box-shadow: 0 0 0 3px rgba(57, 197, 187, 0.18);
+}
+
+#btn-send {
+  padding: 10px 20px;
+  border-radius: 11px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #fff;
+  background: linear-gradient(135deg, var(--miku-teal), var(--miku-blue));
+  transition: transform 0.1s, box-shadow 0.15s;
+}
+
+#btn-send:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(57, 197, 187, 0.45);
+}
+
+#btn-send:disabled {
+  opacity: 0.6;
+  transform: none;
+  box-shadow: none;
+  cursor: not-allowed;
+}
+
+/* ===== 设置弹窗（最小化，不含记忆内容） ===== */
+.popup {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 340px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.97);
+  box-shadow: var(--shadow);
+  z-index: 40;
+  overflow: hidden;
+}
+
+.popup-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-main);
+  background: linear-gradient(90deg, #eaf9f7, #fdeef5);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.close {
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  font-size: 16px;
+  color: var(--text-sub);
+  background: transparent;
+}
+
+.close:hover {
+  background: rgba(0, 0, 0, 0.08);
+  color: var(--text-main);
+}
+
+.settings-body {
+  padding: 14px;
+  font-size: 13px;
+  color: var(--text-main);
+  line-height: 1.7;
+}
+
+.settings-body .row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 0;
+  border-bottom: 1px dashed rgba(0, 0, 0, 0.08);
+}
+
+.settings-body .row:last-child {
+  border-bottom: none;
+}
+
+.settings-body .val {
+  color: var(--text-sub);
+  text-align: right;
+  word-break: break-all;
+}
+
+.settings-body .tip {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(245, 158, 11, 0.1);
+  color: #b45309;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+#nickname-input {
+  width: 100%;
+  margin-top: 4px;
+  padding: 8px 10px;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 8px;
+  font-size: 13px;
+  outline: none;
+  user-select: text;
+}
+
+#btn-save-name {
+  width: 100%;
+  margin-top: 8px;
+  padding: 8px;
+  border-radius: 8px;
+  font-weight: 600;
+  color: #fff;
+  background: linear-gradient(135deg, var(--miku-teal), var(--miku-blue));
+}
+
+/* ===== pywebview 透明桌宠窗口模式 =====
+   注意：html 与 body 都必须透明，否则 html 的渐变背景会透出来 */
+html.pet-mode,
+body.pet-mode {
+  background: transparent !important;
+}
+
+body.pet-mode #pet {
+  padding-bottom: 10px;
+}

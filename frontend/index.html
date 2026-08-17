@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MikuAgent · 初音未来桌宠</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <!-- 桌宠主体：Live2D 为主要部分，悬停时在下方显示输入栏 -->
+  <div id="pet">
+    <div id="miku-stage">
+      <canvas id="live2d-canvas" width="420" height="560"></canvas>
+      <img id="miku-fallback" src="/img/miku_avatar.png" alt="初音未来" hidden>
+      <div id="speech-bubble" hidden></div>
+      <button id="btn-minimize" class="corner-btn" title="最小化">─</button>
+      <button id="btn-close" class="corner-btn close-pet" title="退出桌宠">×</button>
+      <button id="btn-settings" class="corner-btn" title="设置">⚙</button>
+    </div>
+
+    <div id="quick-input">
+      <input id="input-box" type="text" placeholder="和 Miku 说点什么吧…" autocomplete="off" maxlength="2000">
+      <button id="btn-send">发送</button>
+    </div>
+  </div>
+
+  <!-- 设置弹窗（不含记忆内容） -->
+  <div id="settings-popup" class="popup" hidden>
+    <div class="popup-title">设置 <button class="close" id="btn-close-settings">×</button></div>
+    <div id="settings-body"></div>
+  </div>
+
+  <script src="/vendor/pixi.min.js"></script>
+  <script src="/vendor/live2dcubismcore.min.js"></script>
+  <script src="/vendor/cubism4.min.js"></script>
+  <script src="/js/live2d.js"></script>
+  <script src="/js/app.js"></script>
+</body>
+</html>

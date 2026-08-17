@@ -1,0 +1,10 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+openai>=1.30
+python-dotenv>=1.0
+pydantic>=2.6
+# optional: transparent desktop-pet window (start_pet.bat / backend/pet_window.py)
+pywebview>=5.0
+# Qt 后端：透明桌宠窗口（透明 + 鼠标/键盘输入正常）
+PySide6>=6.6
+qtpy>=2.4
