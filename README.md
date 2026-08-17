@@ -6,11 +6,11 @@
 
 ### 透明桌宠窗口版
 
-![透明桌宠窗口版](https://cdn.jsdelivr.net/gh/MikaZou/MikuAgent@main/docs/screenshots/pet.png)
+![透明桌宠窗口版](docs/screenshots/pet.png)
 
 ### Web 浏览器版
 
-![Web 浏览器版](https://cdn.jsdelivr.net/gh/MikaZou/MikuAgent@main/docs/screenshots/web.png)
+![Web 浏览器版](docs/screenshots/web.png)
 
 ## 📥 新电脑安装（2 分钟上手）
 
