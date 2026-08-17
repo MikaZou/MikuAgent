@@ -2,6 +2,16 @@
 
 一个以**初音未来**为角色的虚拟桌宠项目：前端以 **Live2D 模型**为主体，后端以 **DeepSeek API** 作为 Agent 大脑，内置完整的**角色设定**与**记忆系统**。
 
+## 📸 运行截图
+
+<p align="center">
+  <img src="docs/screenshots/web.png" alt="Web 浏览器版运行截图" width="560"><br>
+  <sub>Web 浏览器版</sub>
+  <br><br>
+  <img src="docs/screenshots/pet.png" alt="透明桌宠窗口版运行截图" width="320"><br>
+  <sub>透明桌宠窗口版（置顶、可拖拽）</sub>
+</p>
+
 ## 📥 新电脑安装（2 分钟上手）
 
 在一台全新的电脑上，只需四步：
