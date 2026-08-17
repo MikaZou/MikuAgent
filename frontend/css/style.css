@@ -260,6 +260,38 @@ body.pet-mode #btn-close {
   transform: none;
   box-shadow: none;
   cursor: not-allowed;
+
+/* ===== 语音输入：按住说话按钮 ===== */
+.mic-btn {
+  flex: none;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  font-size: 16px;
+  line-height: 1;
+  color: var(--text-main);
+  background: rgba(57, 197, 187, 0.12);
+  transition: transform 0.12s, background 0.15s, box-shadow 0.2s;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.mic-btn:hover {
+  transform: scale(1.08);
+  background: rgba(57, 197, 187, 0.2);
+}
+
+.mic-btn.recording {
+  color: #fff;
+  background: #ff4d4f;
+  animation: mic-pulse 1.1s ease-out infinite;
+}
+
+@keyframes mic-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(255, 77, 79, 0.45); }
+  100% { box-shadow: 0 0 0 8px rgba(255, 77, 79, 0); }
+}
 }
 
 /* ===== 设置弹窗（最小化，不含记忆内容） ===== */
@@ -356,6 +388,51 @@ body.pet-mode #btn-close {
   font-weight: 600;
   color: #fff;
   background: linear-gradient(135deg, var(--miku-teal), var(--miku-blue));
+}
+
+/* ===== 设置里的开关 ===== */
+.switch {
+  position: relative;
+  display: inline-block;
+  flex: none;
+  width: 38px;
+  height: 21px;
+}
+
+.switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.switch .slider {
+  position: absolute;
+  inset: 0;
+  border-radius: 21px;
+  background: #cbd5e1;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.switch .slider::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 2px;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  transition: transform 0.2s;
+}
+
+.switch input:checked + .slider {
+  background: var(--miku-teal);
+}
+
+.switch input:checked + .slider::before {
+  transform: translateX(17px);
 }
 
 /* ===== pywebview 透明桌宠窗口模式 =====

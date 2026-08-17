@@ -1,4 +1,4 @@
-﻿# MikuAgent · 初音未来虚拟桌宠
+# MikuAgent · 初音未来虚拟桌宠
 
 一个以**初音未来**为角色的虚拟桌宠项目：前端以 **Live2D 模型**为主体，后端以 **DeepSeek API** 作为 Agent 大脑，内置完整的**角色设定**与**记忆系统**。
 
@@ -36,6 +36,7 @@ start.bat
 - **桌宠形态**：可选 pywebview **Qt 后端**透明置顶窗口模式（`start_pet.bat`），Miku 像真正的桌宠一样浮在桌面上，透明区域直接露出桌面；悬停时舞台左上角提供「最小化 / 退出」按钮。
 - **记忆隐藏化**：长期记忆仍由后端自动保存并在对话中引用，但桌宠界面上不再展示记忆列表，保持纯净的宠物体验。
 - **离线演示模式**：未配置 API Key 时自动使用本地预设回复，前端功能可完整体验。
+- **语音输入（按住说话）**：输入栏旁的 🎤 按钮支持按住说话，松开自动转写并发送；faster-whisper 本地转写（默认中文，模型首次自动下载，之后完全离线），无需 API Key。可在设置中开关。
 
 ## 📁 目录结构
 
@@ -45,6 +46,7 @@ MikuAgent/
 │   ├── main.py              # API 路由 + 静态前端托管
 │   ├── agent.py             # DeepSeek Agent（对话、工具调用、情感解析）
 │   ├── persona.py           # 初音未来角色设定（系统提示词）
+│   ├── stt.py              # 语音输入（麦克风录音 + faster-whisper 转写）
 │   ├── memory.py            # 记忆系统（SQLite）
 │   ├── config.py            # 配置读取
 │   └── pet_window.py        # 可选：pywebview 透明桌宠窗口
@@ -133,6 +135,9 @@ start_pet.bat
 | GET | `/api/memory` | 长期记忆列表 |
 | DELETE | `/api/memory/{id}` | 删除长期记忆 |
 | POST | `/api/meta` | 设置元数据（如用户昵称） |
+| POST | `/api/mic/start` | 开始麦克风录音（按住说话） |
+| POST | `/api/mic/stop` | 停止录音并返回转写文本 |
+| POST | `/api/mic/cancel` | 放弃本次录音 |
 
 ## 🎭 自定义角色设定
 
@@ -145,6 +150,8 @@ start_pet.bat
 - **回复是「演示模式」**：`.env` 中未配置或未正确配置 `DEEPSEEK_API_KEY`，或 `MOCK_MODE=true`。
 - **DeepSeek 调用失败**：检查网络与 Key 是否有效；失败时后端会自动回退到演示回复，不会报错。
 - **修改模型**：想换 `deepseek-reasoner`，修改 `.env` 中 `DEEPSEEK_MODEL` 即可。
+- **语音输入没反应 / 转写失败**：首次使用需联网下载 Whisper 模型（默认 `small` 约 460MB）；确认麦克风可用且未被其他程序占用；可在 `.env` 中调整 `STT_MODEL`（`base` 更轻、`small` 更准）与 `STT_LANGUAGE`。
+- **模型下载慢 / 下载失败**：国内网络默认走 hf-mirror.com 镜像；如需切换，可在 `.env` 中设置 `STT_HF_ENDPOINT`（留空 = 官方源）。
 
 ## ⚠️ 说明
 

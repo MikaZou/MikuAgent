@@ -12,6 +12,8 @@
   };
 
   const $ = (id) => document.getElementById(id);
+  const STT_KEY = "miku_stt_enabled";
+  const DEFAULT_PLACEHOLDER = "和 Miku 说点什么吧…";
   const els = {
     canvas: $("live2d-canvas"),
     fallback: $("miku-fallback"),
@@ -19,6 +21,7 @@
     quickInput: $("quick-input"),
     inputBox: $("input-box"),
     btnSend: $("btn-send"),
+    btnMic: $("btn-mic"),
     btnClose: $("btn-close"),
     btnMinimize: $("btn-minimize"),
     btnSettings: $("btn-settings"),
@@ -30,6 +33,9 @@
   const state = {
     sessionId: null,
     busy: false,
+    micStarted: false,
+    recording: false,
+    releasePending: false,
     inPyWebview: !!window.pywebview,
   };
 
@@ -112,14 +118,108 @@
     }
   }
 
+  /* ---------- 语音输入（按住说话） ---------- */
+  function isSttEnabled() {
+    return localStorage.getItem(STT_KEY) !== "0";
+  }
+
+  function setMicButtonVisible() {
+    els.btnMic.hidden = !isSttEnabled();
+  }
+
+  function setMicUI(on) {
+    els.btnMic.classList.toggle("recording", on);
+    els.btnMic.title = on ? "松开结束" : "按住说话";
+    els.inputBox.placeholder = on ? "聆听中…松开结束" : DEFAULT_PLACEHOLDER;
+  }
+
+  function voiceBubble(text, emotion) {
+    setEmotion(emotion || "SAD");
+    showBubble(text, emotion || "SAD");
+    setTimeout(hideBubble, 4000);
+  }
+
+  function startVoiceInput() {
+    if (!isSttEnabled() || state.recording) return;
+    state.recording = true;
+    state.micStarted = false;
+    state.releasePending = false;
+    setMicUI(true);
+    api("/api/mic/start", { method: "POST" })
+      .then((data) => {
+        if (!state.recording) {
+          // 用户在启动完成前已松开或取消，放弃这次录音
+          api("/api/mic/cancel", { method: "POST" }).catch(() => {});
+          return;
+        }
+        if (!data.ok) {
+          state.recording = false;
+          setMicUI(false);
+          voiceBubble(data.message || "麦克风不可用，检查一下是否被占用？", "SAD");
+          return;
+        }
+        state.micStarted = true;
+        if (state.releasePending) {
+          state.releasePending = false;
+          stopVoiceInput();
+        }
+      })
+      .catch((err) => {
+        console.error("[MikuAgent] 麦克风启动失败：", err);
+        state.recording = false;
+        setMicUI(false);
+        voiceBubble("语音输入不可用，看看后端服务是否在运行？", "SAD");
+      });
+  }
+
+  function stopVoiceInput() {
+    state.recording = false;
+    state.micStarted = false;
+    state.releasePending = false;
+    setMicUI(false);
+    api("/api/mic/stop", { method: "POST" })
+      .then((data) => {
+        if (state.recording) return; // 用户已开始新一轮录音
+        const text = (data.text || "").trim();
+        if (text) {
+          els.inputBox.value = text;
+          if (!state.busy) send();
+        } else if (data.error) {
+          voiceBubble(data.error, "SAD");
+        }
+      })
+      .catch((err) => {
+        console.error("[MikuAgent] 语音转写失败：", err);
+        voiceBubble("转写失败了，再试一次？", "SAD");
+      });
+  }
+
+  function cancelVoiceInput() {
+    if (!state.recording) return;
+    state.recording = false;
+    state.micStarted = false;
+    state.releasePending = false;
+    setMicUI(false);
+    api("/api/mic/cancel", { method: "POST" }).catch(() => {});
+  }
   /* ---------- 设置 ---------- */
   async function renderSettings() {
     const health = await api("/api/health");
     const name = localStorage.getItem("miku_user_name") || "";
+    const sttOn = isSttEnabled();
+    const sttStatusText = {
+      ready: `就绪（${health.stt.model}）`,
+      loading: "模型加载中（首次使用需联网下载）",
+      error: "加载失败，请看后端日志",
+    }[health.stt.status] || health.stt.status;
     els.settingsBody.innerHTML = `
       <div class="row"><span>运行模式</span><span class="val">${health.mock ? "演示模式" : "已连接 DeepSeek"}</span></div>
       <div class="row"><span>API Key</span><span class="val">${health.has_api_key ? "已配置 ✓" : "未配置 ✗"}</span></div>
       <div class="row"><span>模型</span><span class="val">${health.model}</span></div>
+      <div class="row"><span>🎤 语音输入（按住说话）</span>
+        <label class="switch"><input type="checkbox" id="toggle-stt" ${sttOn ? "checked" : ""}><span class="slider"></span></label>
+      </div>
+      <div class="row"><span>语音引擎</span><span class="val">${sttStatusText}</span></div>
       <div style="margin-top:10px">
         <label style="font-size:12px;color:var(--text-sub)">Miku 对你的称呼</label>
         <input id="nickname-input" type="text" placeholder="例如：主人 / 小名" value="${escAttr(name)}">
@@ -135,6 +235,13 @@
         body: JSON.stringify({ key: "user_name", value }),
       });
       showBubble("记住啦，主人～之后我就这样叫你哦☆", "HAPPY");
+      setTimeout(hideBubble, 4000);
+    });
+    $("toggle-stt").addEventListener("change", (e) => {
+      localStorage.setItem(STT_KEY, e.target.checked ? "1" : "0");
+      setMicButtonVisible();
+      if (!e.target.checked && state.recording) cancelVoiceInput();
+      showBubble(e.target.checked ? "语音输入已开启，按住 🎤 和我说话吧" : "语音输入已关闭", "HAPPY");
       setTimeout(hideBubble, 4000);
     });
   }
@@ -178,6 +285,20 @@
   /* ---------- 初始化 ---------- */
   async function init() {
     els.btnSend.addEventListener("click", send);
+    els.btnMic.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      try { els.btnMic.setPointerCapture(e.pointerId); } catch (_) {}
+      startVoiceInput();
+    });
+    els.btnMic.addEventListener("pointerup", () => {
+      if (!state.recording) return;
+      if (state.micStarted) stopVoiceInput();
+      else state.releasePending = true;
+    });
+    els.btnMic.addEventListener("pointercancel", cancelVoiceInput);
+    els.btnMic.addEventListener("contextmenu", (e) => e.preventDefault());
+    window.addEventListener("blur", cancelVoiceInput);
+    setMicButtonVisible();
     els.btnClose.addEventListener("click", () => callPet("close"));
     els.btnMinimize.addEventListener("click", () => callPet("minimize"));
     els.inputBox.addEventListener("keydown", (e) => {

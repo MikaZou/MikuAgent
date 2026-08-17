@@ -9,9 +9,11 @@ from pydantic import BaseModel, Field
 import config
 from agent import MikuAgent
 from memory import MemoryStore
+from stt import SpeechToText
 
 memory = MemoryStore(config.DB_PATH)
 agent = MikuAgent(memory)
+stt = SpeechToText()
 
 app = FastAPI(
     title="MikuAgent",
@@ -44,6 +46,18 @@ class MetaRequest(BaseModel):
     value: str = Field("", max_length=500)
 
 
+class MicStartResponse(BaseModel):
+    ok: bool
+    message: str = ""
+
+
+class MicStopResponse(BaseModel):
+    ok: bool
+    text: str = ""
+    duration: float = 0.0
+    error: str = ""
+
+
 @app.get("/api/health")
 def health():
     return {
@@ -53,6 +67,11 @@ def health():
         "model": agent.model,
         "base_url": config.DEEPSEEK_BASE_URL,
         "version": app.version,
+        "stt": {
+            "status": stt.status,
+            "model": config.STT_MODEL,
+            "language": config.STT_LANGUAGE or "auto",
+        },
     }
 
 
@@ -107,6 +126,24 @@ def delete_memory(memory_id: int):
 @app.post("/api/meta")
 def set_meta(req: MetaRequest):
     memory.set_meta(req.key.strip(), req.value.strip())
+    return {"ok": True}
+
+
+@app.post("/api/mic/start")
+def mic_start():
+    ok, message = stt.start()
+    return MicStartResponse(ok=ok, message=message)
+
+
+@app.post("/api/mic/stop")
+def mic_stop():
+    result = stt.stop()
+    return MicStopResponse(**result)
+
+
+@app.post("/api/mic/cancel")
+def mic_cancel():
+    stt.cancel()
     return {"ok": True}
 
 
