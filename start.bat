@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-title MikuAgent - 初音未来虚拟桌宠
+title MikuAgent - 初音未来桌宠
 cd /d "%~dp0"
 
 if not exist ".venv\Scripts\python.exe" (
@@ -16,11 +16,11 @@ if not exist ".env" (
 
 echo.
 echo ============================================
-echo    MikuAgent 初音未来虚拟桌宠 启动中...
-echo    访问地址: http://127.0.0.1:8000
+echo    MikuAgent 初音未来原生桌宠 启动中...
+echo    无边框 / 透明 / 置顶，可拖动
+echo    右键托盘图标可打开设置或退出
 echo ============================================
 echo.
 
-start "MikuAgent Backend" cmd /k ".venv\Scripts\python.exe -m uvicorn main:app --app-dir backend --host 127.0.0.1 --port 8000"
-timeout /t 2 /nobreak >nul
-start "" "http://127.0.0.1:8000"
+rem pythonw：无控制台窗口启动。必须用绝对路径，相对路径 Start-Process 会解析失败。
+start "" "%~dp0.venv\Scripts\pythonw.exe" "%~dp0main.py"

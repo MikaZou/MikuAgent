@@ -1,0 +1,25 @@
+# ===== 可选：本地初音未来音色（GPT-SoVITS / GSV-TTS-Lite）=====
+#
+# 只有把 .env 里的 TTS_ENGINE 设为 sovits 时才需要装这些。
+# 体积很大（PyTorch cu128 约 3GB），不装也不影响 —— 默认走 edge 在线引擎。
+#
+# 安装步骤：
+#   1) 装 PyTorch（NVIDIA 显卡；无显卡去掉 --index-url 装 CPU 版）
+#        .venv\Scripts\python.exe -m pip install torch torchaudio ^
+#            --index-url https://download.pytorch.org/whl/cu128
+#   2) 装本文件
+#        .venv\Scripts\python.exe -m pip install -r requirements-tts.txt
+#   3) 在 .env 里配置：
+#        TTS_ENGINE=sovits
+#        TTS_REF_AUDIO=D:\path\to\miku_reference.wav   # 5~10s 干净人声，决定音色
+#        TTS_PROMPT_AUDIO=...                          # 可选：风格参考
+#        TTS_PROMPT_TEXT=...                           # 可选：风格参考对应文本
+#        TTS_GPT_MODEL=...                             # 可选：已训练的 GPT 权重
+#        TTS_SOVITS_MODEL=...                          # 可选：已训练的 SoVITS 权重
+#
+# 实测参考（官方给出的 RTX 3050 Laptop 数据，与本机同型号）：
+#   RTF ≈ 0.125、显存 ≈ 0.8GB —— 远快于实时。
+#
+# 版权提醒：初音未来的音色归 Crypton Future Media 所有，
+# 请仅用于本机个人学习，不要分发克隆出的音色。
+gsv-tts-lite>=0.4

@@ -1,15 +1,30 @@
-fastapi>=0.110
-uvicorn[standard]>=0.29
+# ===== 原生桌宠外壳（PySide6 + Live2D Cubism Native）=====
+# 注意：PySide6 必须 <6.9。
+# 6.11 的 Windows wheel 没有打包 ICU DLL，而它的 Qt6Core.dll 依赖 icuuc.dll，
+# 会落到 C:\Windows\System32\icuuc.dll（只是个转发到旧版 ICU 的壳），
+# 结果 import PySide6.QtCore 直接报 ERROR_PROC_NOT_FOUND (127)。
+# 6.8.3 实测正常。
+#
+# 用 Essentials 而不是 PySide6 元包：元包会连带 PySide6-Addons（含 QtWebEngine，
+# 约 168MB），本项目是原生渲染，完全用不到。已实测仅装 Essentials 可正常运行。
+# 注意：Essentials 与 Addons 装进同一个 PySide6/ 目录，如果你先装过 Addons，
+# 再单独 pip uninstall PySide6-Addons 会误删共享 DLL，此时重装 Essentials 即可。
+PySide6-Essentials>=6.6,<6.9
+
+# Live2D 渲染：Cubism Native SDK 的 Python C 扩展，不经过 Web Engine
+live2d-py>=0.7
+PyOpenGL>=3.1
+numpy>=1.26
+
+# ===== Agent 大脑（DeepSeek / OpenAI 兼容接口）=====
 openai>=1.30
 python-dotenv>=1.0
-pydantic>=2.6
-# optional: transparent desktop-pet window (start_pet.bat / backend/pet_window.py)
-pywebview>=5.0
-# Qt 后端：透明桌宠窗口（透明 + 鼠标/键盘输入正常）
-PySide6>=6.6
-qtpy>=2.4
 
-# 语音输入（按住说话 + faster-whisper 本地转写）
+# ===== 语音输入 STT（按住说话 + faster-whisper 本地转写）=====
 sounddevice>=0.4.6
-numpy>=1.26
 faster-whisper>=1.0
+av>=11
+
+# ===== 语音输出 TTS（默认引擎：微软在线 TTS，体积极小）=====
+# 想用本地初音音色请看 requirements-tts.txt
+edge-tts>=7.0

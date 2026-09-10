@@ -8,3 +8,5 @@ data/
 *.db-shm
 .DS_Store
 Thumbs.db
+.tmp/
+*.log

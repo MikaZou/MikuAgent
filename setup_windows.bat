@@ -29,6 +29,16 @@ if not defined PYTHON_EXE (
 echo [1/4] 使用 Python: %PYTHON_EXE%
 "%PYTHON_EXE%" --version
 
+rem live2d-py 只提供 Python 3.10+ 的预编译包，低版本装不上，提前拦一下
+"%PYTHON_EXE%" -c "import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)"
+if errorlevel 1 (
+    echo.
+    echo [错误] 需要 Python 3.10 及以上版本。
+    echo        Live2D 渲染依赖 live2d-py，官方只提供 3.10+ 的 wheel。
+    pause
+    exit /b 1
+)
+
 rem ---- 2. 创建虚拟环境 ----
 if not exist ".venv\Scripts\python.exe" (
     echo [2/4] 创建虚拟环境 .venv ...
