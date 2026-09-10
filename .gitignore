@@ -11,3 +11,6 @@ Thumbs.db
 .tmp/
 *.log
 .diag/
+
+# 参考音频来自第三方版权素材，不入库（各人自备）
+assets/voice/

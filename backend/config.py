@@ -60,5 +60,25 @@ TTS_GPT_MODEL = os.getenv("TTS_GPT_MODEL", "").strip()
 TTS_SOVITS_MODEL = os.getenv("TTS_SOVITS_MODEL", "").strip()
 TTS_MAX_CHARS = int(os.getenv("TTS_MAX_CHARS", "200"))
 TTS_CACHE_DIR = DATA_DIR / "tts-cache"
+# GSV-TTS-Lite 的预训练模型目录（默认落在 ~/.cache/gsv，改到项目内便于管理）
+TTS_MODELS_DIR = Path(os.getenv("TTS_MODELS_DIR", str(DATA_DIR / "gsv-models")))
+# 是否启用 BERT（中文效果更好，但多占约 0.65GB 显存）
+TTS_USE_BERT = os.getenv("TTS_USE_BERT", "true").strip().lower() in {"1", "true", "yes", "on"}
+# sovits 合成服务（独立进程）监听端口与就绪超时
+TTS_SERVER_PORT = int(os.getenv("TTS_SERVER_PORT", "18520"))
+TTS_SERVER_TIMEOUT = int(os.getenv("TTS_SERVER_TIMEOUT", "180"))
+# 单次合成的 socket 超时（首次含模型加载，给足时间）
+TTS_SYNTH_TIMEOUT = int(os.getenv("TTS_SYNTH_TIMEOUT", "300"))
+
+# GPT-SoVITS 的英文 G2P 会用到 nltk（文本里出现英文单词时触发）。
+# 默认数据目录在用户目录下且国内下载源常连不上，这里固定到项目内。
+NLTK_DATA_DIR = DATA_DIR / "nltk_data"
+os.environ.setdefault("NLTK_DATA", str(NLTK_DATA_DIR))
+
+
+def resolve_path(value: str) -> Path:
+    """把配置里的路径解析成绝对路径（相对路径按项目根目录算）。"""
+    p = Path(value).expanduser()
+    return p if p.is_absolute() else (BASE_DIR / p)
 
 HAS_API_KEY = bool(DEEPSEEK_API_KEY) and DEEPSEEK_API_KEY != "sk-xxxxxxxx"

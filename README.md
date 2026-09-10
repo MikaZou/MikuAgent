@@ -65,6 +65,7 @@ MikuAgent/
 │   ├── memory.py            # 记忆系统（SQLite）
 │   ├── stt.py               # 语音输入（麦克风 + faster-whisper）
 │   ├── tts.py               # 语音输出（文本清洗 + 合成 + 缓存）
+│   ├── tts_server.py        # 可选：GPT-SoVITS 合成服务（独立进程，见 TTS 一节）
 │   └── config.py            # 配置读取
 ├── assets/                  # 资源
 │   ├── live2d/miku/         # 初音 Live2D 模型（MIKU.moc3 + 表情/动作）
@@ -72,6 +73,12 @@ MikuAgent/
 ├── tools/                   # 开发辅助脚本
 │   ├── smoke_live2d.py      # 最小渲染验证（排查显卡/驱动问题）
 │   ├── selftest_chat.py     # 端到端自检（对话→TTS→口型）
+│   ├── diag_expressions.py  # 逐个 exp3 表情截图对照（排查素材问题）
+│   ├── diag_emotions.py     # 逐个情感截图对照
+│   ├── diag_tts.py          # TTS 引擎连通性诊断
+│   ├── prepare_ref_audio.py # 从媒体里挑干净的参考音频（含质量指标）
+│   ├── test_sovits.py       # 直接测 GPT-SoVITS（绕过服务进程）
+│   ├── fetch_wheel.py       # 支持断点续传的下载器（curl 在本机 TLS 不可用）
 │   └── capture_window.ps1   # 抓取窗口截图
 ├── data/                    # 运行时数据（自动生成，不入库）
 │   ├── mikuagent.db         # 会话 / 消息 / 长期记忆
@@ -133,23 +140,61 @@ TTS_PITCH=+25Hz                # 音调调高更接近动漫少女音
 
 ### 可选引擎：`sovits`（本地初音音色）
 
-想用**真正的初音音色**，需要装 GPT-SoVITS 推理后端：
+想用**真正的初音音色**，需要装 GPT-SoVITS 推理后端。已在本机实测跑通（RTX 3050 Ti Laptop 4GB）。
+
+**1. 装 PyTorch。** cu128 的 torch wheel 有 **2.6GB**，pip 不支持断点续传，国内直连容易断，
+用项目自带的下载器（支持续传，中断后重跑同一条命令即可）：
 
 ```bat
-rem 1. 装 PyTorch（NVIDIA 显卡，CUDA 12.8）
-.venv\Scripts\python.exe -m pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128
-
-rem 2. 装 GSV-TTS-Lite
-.venv\Scripts\python.exe -m pip install -r requirements-tts.txt
-
-rem 3. .env 里切换引擎，并给一段初音参考音频（5~10 秒干净人声）
-TTS_ENGINE=sovits
-TTS_REF_AUDIO=D:\path\to\miku_reference.wav
+python tools\fetch_wheel.py "https://download.pytorch.org/whl/cu128/torch-2.11.0%%2Bcu128-cp310-cp310-win_amd64.whl" ".tmp/wheels/torch.whl"
+python tools\fetch_wheel.py "https://download.pytorch.org/whl/cu128/torchaudio-2.11.0%%2Bcu128-cp310-cp310-win_amd64.whl" ".tmp/wheels/torchaudio.whl"
+.venv\Scripts\python.exe -m pip install .tmp\wheels\torch.whl .tmp\wheels\torchaudio.whl
 ```
 
-实测参考（RTX 3050 Laptop，与开发机同型号）：**RTF ≈ 0.125、显存 ≈ 0.8GB**，远快于实时。
+**2. 装 GSV-TTS-Lite。** 预训练模型（约 1.6GB）首次运行会从 ModelScope 自动下载到 `data/gsv-models/`。
 
-> ⚠️ **版权**：初音未来的音色归 Crypton Future Media 所有。克隆出的音色请仅用于本机个人学习，不要分发。
+```bat
+.venv\Scripts\python.exe -m pip install -r requirements-tts.txt
+```
+
+**3. 准备参考音频**（5~10 秒、单人、**干声无伴奏**）。带伴奏的素材会把伴奏一起学进去：
+
+```bat
+rem 从任意媒体里自动挑一段最干净的语音
+python tools\prepare_ref_audio.py 你的素材.m4a --out assets\voice\miku_ref.wav --seconds 6
+```
+
+判断依据是脚本会打印的**噪声底**（低于 -45dB 才算干声）、**调制深度**（>7dB 像语音，<5dB 像音乐）
+和**真静音占比**。歌曲/演唱会录像通常全程带 BGM，不建议直接用。
+
+**4. 拿到参考音频的转写文本。** GPT-SoVITS 的 `prompt_audio_text` 是必填的，
+且必须与音频内容一致 —— 用项目自带的 Whisper 转一下即可：
+
+```bat
+.venv\Scripts\python.exe -c "from faster_whisper import WhisperModel; m=WhisperModel('small',device='cpu',compute_type='int8'); s,_=m.transcribe('assets/voice/miku_ref.wav',language='zh'); print(''.join(x.text for x in s))"
+```
+
+**5. 在 `.env` 里切换：**
+
+```ini
+TTS_ENGINE=sovits
+TTS_REF_AUDIO=assets/voice/miku_ref.wav
+TTS_PROMPT_TEXT=这里填上一步转出来的文本
+TTS_USE_BERT=true          # 中文效果更好；显存吃紧设 false
+```
+
+**实机数据**：开 BERT 显存约 **2.2GB**、关掉约 1.7GB；**RTF ≈ 0.78**（9.8 秒音频耗时 7.7 秒）。
+
+> **两处踩过的坑，已内置处理：**
+> - 4GB 显存要和桌宠共享，必须给 PyTorch 设 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`，
+>   否则加载参考音频时会 CUDA OOM。程序启动合成服务时会自动设置。
+> - 合成跑在**独立进程**里（`backend/tts_server.py`，监听 `127.0.0.1:18520`）。
+>   原因见 `backend/tts_server.py` 顶部注释：Python 3.10 + torch 2.11 下，
+>   在 Qt 应用的后台线程里首次 `import torch` 会稳定抛
+>   `TypeError: Plain typing.Self is not valid as type argument`，而在干净进程里正常。
+
+> ⚠️ **版权**：初音未来的音色归 Crypton Future Media 所有。参考音频与克隆出的音色
+> 请仅用于本机个人学习，**不要分发**（`assets/voice/` 已在 `.gitignore` 中）。
 
 ### 口型同步
 

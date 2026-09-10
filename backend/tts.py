@@ -14,12 +14,26 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import re
+import sys
 import threading
+import time
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
+
+# 必须在任何后台线程启动前导入 typing_extensions。
+#
+# 背景：stt.py 的 Whisper 加载线程与 tts.py 的模型预加载线程会并发首次导入
+# typing_extensions（前者经 tokenizers/huggingface_hub，后者经 torch）。
+# 在 Python 3.10 下这会让 typing_extensions.Self 处于未完成状态，
+# 于是 torch.distributed._pycute/layout.py 里的 `Self | int` 注解求值直接抛
+#   TypeError: Plain typing.Self is not valid as type argument
+# 现象是「脚本里 import torch 没事，一进 App 就必失败」。
+# 在这里顶层导入一次，即可保证两个线程启动前它已经完整加载。
+import typing_extensions  # noqa: F401  (见上方说明，勿删)
 
 import config
 
@@ -99,11 +113,101 @@ class TextToSpeech:
         self._status = "idle"
         self._detail = ""
         self._gsv = None
+        self._server = None          # sovits 合成服务子进程
+        self._server_log = None
 
         try:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
         except Exception:  # noqa: BLE001
             pass
+
+        # sovits 首次合成要加载约 2.4GB 模型（十几秒），放后台线程预热，
+        # 否则「第一条回复」会让人以为卡死了。
+        if self.engine == "sovits" and config.TTS_ENABLED:
+            threading.Thread(target=self._preload, daemon=True).start()
+
+    def _preload(self) -> None:
+        """后台把合成服务拉起来（首次要加载约 2.4GB 模型，约 20s）。"""
+        try:
+            self._ensure_server(wait=True)
+            print("[TTS] GPT-SoVITS 服务已就绪（初音音色）")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[TTS] 服务启动失败：{exc}")
+
+    # ------------------------------------------------------- sovits 服务进程
+    def _port_open(self) -> bool:
+        import socket as _socket
+
+        try:
+            with _socket.create_connection(
+                ("127.0.0.1", config.TTS_SERVER_PORT), timeout=0.5
+            ):
+                return True
+        except OSError:
+            return False
+
+    def _spawn_server(self) -> None:
+        """启动独立的合成服务进程。
+
+        为什么不用线程内导入：在 Qt 应用的后台线程里首次 import torch 会稳定失败
+        （Python 3.10 + torch 2.11 的 typing.Self 注解问题），而干净进程的主线程里正常。
+        """
+        import subprocess
+
+        script = Path(__file__).resolve().parent / "tts_server.py"
+        log_path = Path(config.DATA_DIR) / "tts-server.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_file = open(log_path, "ab")
+
+        creationflags = 0
+        if os.name == "nt":
+            creationflags = subprocess.CREATE_NO_WINDOW
+
+        # 4GB 显存还要和桌宠共享，降低 PyTorch 的显存碎片
+        env = os.environ.copy()
+        env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
+        self._server_log = log_file
+        self._server = subprocess.Popen(
+            [sys.executable, "-u", str(script), str(config.TTS_SERVER_PORT)],
+            cwd=str(config.BASE_DIR),
+            stdin=subprocess.DEVNULL,
+            stdout=log_file,
+            stderr=log_file,
+            creationflags=creationflags,
+            env=env,
+        )
+        print(f"[TTS] 已启动合成服务进程 pid={self._server.pid}（日志 data/tts-server.log）")
+
+    def _ensure_server(self, wait: bool = True) -> bool:
+        if self._port_open():
+            return True
+        if self._server is None or self._server.poll() is not None:
+            self._spawn_server()
+        if not wait:
+            return False
+
+        deadline = time.time() + config.TTS_SERVER_TIMEOUT
+        while time.time() < deadline:
+            if self._port_open():
+                return True
+            if self._server.poll() is not None:
+                raise RuntimeError(
+                    f"合成服务进程退出（code={self._server.returncode}），"
+                    "详见 data/tts-server.log"
+                )
+            time.sleep(0.5)
+        raise TimeoutError(f"合成服务 {config.TTS_SERVER_TIMEOUT}s 内未就绪")
+
+    def shutdown(self) -> None:
+        """退出时收掉服务进程。"""
+        proc = getattr(self, "_server", None)
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+            except Exception:  # noqa: BLE001
+                pass
+        self._server = None
 
     # ------------------------------------------------------------------ 状态
     @property
@@ -113,8 +217,23 @@ class TextToSpeech:
         if self.engine == "edge":
             return self._edge_status()
         if self.engine == "sovits":
-            return self._status
+            if self._status in ("loading", "ready", "error"):
+                return self._status
+            return self._sovits_available()
         return "unavailable"
+
+    @staticmethod
+    def _sovits_available() -> str:
+        """只检查依赖是否装了，不真的 import（import gsv_tts 要十几秒，会卡住 UI）。"""
+        import importlib.util
+
+        for mod in ("gsv_tts", "torch", "torchaudio"):
+            try:
+                if importlib.util.find_spec(mod) is None:
+                    return "unavailable"
+            except (ImportError, ValueError):
+                return "unavailable"
+        return "ready"
 
     @property
     def status_detail(self) -> str:
@@ -233,48 +352,49 @@ class TextToSpeech:
         tmp.replace(dst)
 
     # ---------------------------------------------------------------- sovits
-    def _ensure_gsv(self):
-        """懒加载 GSV-TTS-Lite（重型，只有选 sovits 引擎才会走到）。"""
-        if self._gsv is not None:
-            return self._gsv
-        self._status = "loading"
-        try:
-            from gsv_tts import TTS as GSVTTS  # type: ignore
-
-            tts = GSVTTS()
-            tts.load_gpt_model(config.TTS_GPT_MODEL or None)
-            tts.load_sovits_model(config.TTS_SOVITS_MODEL or None)
-            if config.TTS_REF_AUDIO:
-                try:
-                    tts.cache_spk_audio(config.TTS_REF_AUDIO)
-                except Exception:  # noqa: BLE001
-                    pass
-            if config.TTS_PROMPT_AUDIO:
-                try:
-                    tts.cache_prompt_audio(
-                        config.TTS_PROMPT_AUDIO, config.TTS_PROMPT_TEXT or ""
-                    )
-                except Exception:  # noqa: BLE001
-                    pass
-            self._gsv = tts
-            self._status = "ready"
-            return tts
-        except Exception as exc:  # noqa: BLE001
-            self._status = "error"
-            self._detail = str(exc)
-            raise
-
     def _synth_sovits(self, text: str, emotion: str, out_wav: Path) -> Optional[Path]:
+        """通过独立进程合成（初音音色）。
+
+        不走进程内导入的原因见 _spawn_server 的说明。
+        """
+        import json
+        import socket
+
         if not config.TTS_REF_AUDIO:
             raise RuntimeError("未配置 TTS_REF_AUDIO（初音音色参考音频）")
-        tts = self._ensure_gsv()
-        audio = tts.infer(
-            spk_audio_path=config.TTS_REF_AUDIO,
-            prompt_audio_path=config.TTS_PROMPT_AUDIO or None,
-            prompt_audio_text=config.TTS_PROMPT_TEXT or None,
-            text=text,
-        )
-        tmp = out_wav.with_suffix(".gsv.part")
-        audio.save(str(tmp))
-        Path(tmp).replace(out_wav)
-        return out_wav
+        if not config.TTS_PROMPT_TEXT:
+            raise RuntimeError(
+                "未配置 TTS_PROMPT_TEXT（参考音频的转写文本，GPT-SoVITS 必填）"
+            )
+
+        self._ensure_server(wait=True)
+
+        payload = json.dumps(
+            {"text": text, "emotion": emotion, "out": str(out_wav)}, ensure_ascii=False
+        ).encode("utf-8") + b"\n"
+
+        with socket.create_connection(
+            ("127.0.0.1", config.TTS_SERVER_PORT), timeout=config.TTS_SYNTH_TIMEOUT
+        ) as sock:
+            sock.settimeout(config.TTS_SYNTH_TIMEOUT)
+            sock.sendall(payload)
+
+            buf = b""
+            while not buf.endswith(b"\n"):
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                buf += chunk
+
+        if not buf.strip():
+            raise RuntimeError("合成服务没有返回结果")
+        resp = json.loads(buf.decode("utf-8"))
+        if not resp.get("ok"):
+            raise RuntimeError(resp.get("error") or "合成失败")
+
+        path = Path(resp["path"])
+        if not path.exists():
+            raise RuntimeError(f"合成服务声称成功但文件不存在：{path}")
+        self._status = "ready"
+        return path
+
