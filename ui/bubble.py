@@ -30,8 +30,9 @@ class SpeechBubble(QFrame):
         self.setStyleSheet(
             """
             #speechBubble {
-                background: rgba(255, 255, 255, 242);
+                background: rgba(255, 255, 255, 252);
                 border-radius: 16px;
+                border: 1px solid rgba(57, 197, 187, 0.35);
             }
             #bubbleContent {
                 color: #1f2430;
@@ -74,8 +75,9 @@ class SpeechBubble(QFrame):
         body.addLayout(header)
         body.addWidget(self._content)
 
-        self.setMaximumWidth(320)
-        self.setMinimumWidth(120)
+        # 宽度由 PetWindow._layout_children 统一设定；这里只兜底一个最小宽度，
+        # 不再设 maximumWidth —— 否则短句气泡会被压得很小。
+        self.setMinimumWidth(140)
 
         self._full_text = ""
         self._shown = 0

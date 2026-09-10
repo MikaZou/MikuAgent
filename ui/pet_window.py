@@ -24,9 +24,15 @@ from ui.settings_dialog import SettingsDialog
 from ui.tray import Tray
 
 # 模型取景。实测：Resize 后模型底部贴着窗口底边，dy 为正会把模型上移
-# （0.15 ≈ 33 逻辑像素），所以这里用正的 dy 把整体抬起，给底部输入栏让位。
-FRAMING_SCALE = 1.0
+# （0.15 ≈ 33 逻辑像素），所以这里用正的 dy 把整体抬起。
+# 同时缩小一点，给顶部气泡和底部输入栏留出干净的空间，避免头发压着气泡。
+FRAMING_SCALE = 0.9
 FRAMING_OFFSET = (0.0, 0.45)
+
+# 布局尺寸
+BUBBLE_MARGIN = 16      # 气泡左右留白
+BUBBLE_TOP = 8          # 气泡距窗口顶部
+BUBBLE_MAX_H = 150      # 气泡最大高度，避免长回复盖住整张脸
 
 GREETING = "主人你好呀！我是初音ミク☆ 把鼠标移到我身上就能和我说话啦～"
 
@@ -126,13 +132,15 @@ class PetWindow(Live2DView):
         self.btn_close.move(46, 10)
         self.btn_settings.move(w - 40, 10)
 
-        self.bubble.adjustSize()
-        bw = max(140, min(self.bubble.width(), w - 24))
-        self.bubble.setFixedWidth(bw)
-        self.bubble.adjustSize()
-        self.bubble.move(max(0, (w - self.bubble.width()) // 2), 48)
-
+        # 气泡：始终占满可用宽度（而不是随文字长短忽宽忽窄），
+        # 这样短句也够大、长句换行整齐，不会再被头发挤成一小块。
         bar_h = 58
+        bubble_w = max(160, w - BUBBLE_MARGIN * 2)
+        self.bubble.setFixedWidth(bubble_w)
+        self.bubble.setMaximumHeight(BUBBLE_MAX_H)
+        self.bubble.adjustSize()
+        self.bubble.move(max(0, (w - self.bubble.width()) // 2), BUBBLE_TOP)
+
         self.input_bar.setGeometry(12, h - bar_h - 12, w - 24, bar_h)
 
     # ------------------------------------------------------------ 显示/隐藏

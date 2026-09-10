@@ -33,13 +33,17 @@ EMOTION_MOTION = {
 }
 
 # 情感 → 表情（对应「表情和动作/」下的 exp3）
+#
+# 注意：模型自带的 Dazhihui 与 Mimiyan 两个 exp3 用在这个模型上会画出错位的
+# 红色横条（压在眼睛上）和翻白眼，实测逐个应用后确认是坏素材，已弃用。
+# 只用验证过正常的三张：Chijing（吃惊）、Saihong（腮红）、liuhan（泪眼）。
 EMOTION_EXPRESSION = {
     "HAPPY": "Saihong",      # 腮红
-    "ANGRY": None,           # 生气用动作表现
+    "MOTIVATED": "Saihong",  # 元气也用腮红（原 Dazhihui 会画出错位红条）
     "SURPRISED": "Chijing",  # 吃惊
-    "SAD": None,
-    "MOTIVATED": "Dazhihui",
-    "EMPATHY": "Mimiyan",    # 眯眯眼
+    "EMPATHY": "liuhan",     # 温柔/共情用泪眼（原 Mimiyan 会翻白眼）
+    "SAD": "liuhan",         # 难过用泪眼
+    "ANGRY": None,           # 生气用动作表现
     "NORMAL": None,
 }
 
@@ -212,10 +216,10 @@ class Live2DView(QOpenGLWidget):
         if self.model is None:
             return
         try:
+            # 先清掉上一张：否则两张 exp3 的参数会叠加，出现「表情重叠」
+            self.model.ResetExpression()
             if name and name in self.expression_ids:
                 self.model.SetExpression(name)
-            else:
-                self.model.ResetExpression()
         except Exception:  # noqa: BLE001
             pass
 

@@ -10,3 +10,4 @@ data/
 Thumbs.db
 .tmp/
 *.log
+.diag/

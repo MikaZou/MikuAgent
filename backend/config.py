@@ -41,8 +41,8 @@ AVATAR_PATH = ASSETS_DIR / "img" / "miku_avatar.png"
 WINDOW_STATE_FILE = DATA_DIR / "window.json"
 
 # 窗口尺寸（透明无边框）
-WINDOW_WIDTH = int(os.getenv("WINDOW_WIDTH", "460"))
-WINDOW_HEIGHT = int(os.getenv("WINDOW_HEIGHT", "680"))
+WINDOW_WIDTH = int(os.getenv("WINDOW_WIDTH", "400"))
+WINDOW_HEIGHT = int(os.getenv("WINDOW_HEIGHT", "580"))
 WINDOW_FPS = int(os.getenv("WINDOW_FPS", "60"))
 
 # ===== 语音输出（TTS） =====
