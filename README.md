@@ -246,6 +246,9 @@ EMOTION_EXPRESSION = {"HAPPY": "Saihong", "SURPRISED": "Chijing", ...}
 
 ## 🛠️ 技术栈
 
+> 📖 **完整技术文档见 [`docs/TECHNICAL.md`](docs/TECHNICAL.md)** —— 涵盖 TTS 与 Live2D 动作的实现原理、
+> 实测性能数据（显存拆解 / 延迟优化）、以及后续扩展（显存优化路径、Agent 驱动的 Live2D 动画可行性）。
+
 | 技术 | 版本 | 用途 |
 | --- | --- | --- |
 | Python | 3.10+ | 运行时 |
