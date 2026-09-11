@@ -16,6 +16,7 @@ from typing import Optional
 
 import OpenGL.GL as gl
 import live2d.v3 as live2d
+import numpy as np
 from live2d.utils.lipsync import WavHandler
 from PySide6.QtCore import QPoint, Qt, Signal
 from PySide6.QtGui import QCursor, QGuiApplication
@@ -289,6 +290,39 @@ class Live2DView(QOpenGLWidget):
 
     def is_in_model(self, x: float, y: float) -> bool:
         return self._alpha_at(x, y) > 8
+
+    def measure_model_top(self) -> Optional[int]:
+        """测出模型最上面一行在窗口内的 y（逻辑像素，原点在左上）。
+
+        一次性读整块 framebuffer 的 alpha 通道取最小行，比逐点 glReadPixels 快得多。
+        外层用它把角标按钮贴在初音头顶上方，而不是固定在窗口顶端留一大片空白。
+        注意 glReadPixels 原点在左下，所以要翻转。
+        """
+        if self.model is None:
+            return None
+        w = int(self.width() * self.scale_factor)
+        h = int(self.height() * self.scale_factor)
+        if w <= 0 or h <= 0:
+            return None
+        try:
+            self.makeCurrent()
+            try:
+                raw = gl.glReadPixels(0, 0, w, h, gl.GL_RGBA, gl.GL_UNSIGNED_BYTE)
+            finally:
+                self.doneCurrent()
+        except Exception:  # noqa: BLE001
+            return None
+        if not raw:
+            return None
+        arr = np.frombuffer(raw, dtype=np.uint8)
+        if arr.size < w * h * 4:
+            return None
+        alpha = arr.reshape(h, w, 4)[:, :, 3]
+        rows = np.where(alpha.max(axis=1) > 8)[0]
+        if len(rows) == 0:
+            return None
+        top_device = int(rows.max())          # GL 坐标：行号越大越靠上
+        return int((h - 1 - top_device) / self.scale_factor)
 
     # ------------------------------------------------------------------ 鼠标
     def mousePressEvent(self, event) -> None:  # noqa: N802

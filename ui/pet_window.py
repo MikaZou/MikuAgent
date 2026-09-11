@@ -36,8 +36,10 @@ FRAMING_OFFSET = (0.0, 0.15)
 
 # 布局尺寸（改这里要同步 tools/measure_framing.py 里的同名常量）
 BUBBLE_MARGIN = 16      # 气泡左右留白
-BUBBLE_TOP = 46         # 气泡距窗口顶部：必须让开上面那排 30px 高的角标按钮
+BUBBLE_TOP = 46         # 气泡距窗口顶部：必须让开上面那排角标按钮
 BUBBLE_MAX_H = 132      # 气泡最大高度；模型按这个上沿来避让
+BUTTON_MARGIN = 10      # 角标按钮距窗口边缘
+BUTTON_SIZE = 30        # 角标按钮边长（与 _corner_button 里的 setFixedSize 一致）
 
 GREETING = "主人你好呀！我是初音ミク☆ 把鼠标移到我身上就能和我说话啦～"
 
@@ -75,9 +77,11 @@ class PetWindow(Live2DView):
         self._tts_enabled = SettingsDialog.tts_enabled()
         self._stt_enabled = SettingsDialog.stt_enabled()
         self._chat_worker: Optional[ChatWorker] = None
-        self._tts_worker: Optional[TtsWorker] = None
+        self._tts_worker: Optional[TtsPipelineWorker] = None
         self._stt_worker: Optional[TranscribeWorker] = None
         self._recording = False
+        # 初音模型顶部的实测位置（逻辑像素）；用来把角标按钮贴到她头顶上方
+        self._model_top: Optional[int] = None
 
         self.resize(config.WINDOW_WIDTH, config.WINDOW_HEIGHT)
 
@@ -111,6 +115,8 @@ class PetWindow(Live2DView):
 
         self.model_clicked.connect(self._on_model_clicked)
         self.model_load_failed.connect(self._on_model_load_failed)
+        # 气泡出现/消失时重排角标按钮：有气泡就回到顶端，没气泡就贴到初音头顶
+        self.bubble.visibility_changed.connect(lambda _visible: self._layout_children())
 
         self._restore_geometry()
         self._init_session()
@@ -130,12 +136,29 @@ class PetWindow(Live2DView):
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         self._layout_children()
+        # 尺寸变了模型位置也变，延后重新量一次（避开连续 resize 抖动）
+        if self.model is not None:
+            QTimer.singleShot(250, self._measure_model_top)
+
+    def _button_row_y(self) -> int:
+        """角标按钮的纵向位置。
+
+        - 有气泡时：待在窗口顶端（气泡从 BUBBLE_TOP 开始，正好让开）
+        - 没气泡时：下移贴到初音头顶上方，避免顶部留一大片空白
+        模型顶部是运行时实测的（Live2DView.measure_model_top），不是写死的常数。
+        """
+        if self.bubble.isVisible():
+            return BUTTON_MARGIN
+        if self._model_top is None:
+            return BUTTON_MARGIN
+        return max(BUTTON_MARGIN, self._model_top - BUTTON_SIZE - 10)
 
     def _layout_children(self) -> None:
         w, h = self.width(), self.height()
-        self.btn_min.move(10, 10)
-        self.btn_close.move(46, 10)
-        self.btn_settings.move(w - 40, 10)
+        btn_y = self._button_row_y()
+        self.btn_min.move(BUTTON_MARGIN, btn_y)
+        self.btn_close.move(BUTTON_MARGIN + BUTTON_SIZE + 6, btn_y)
+        self.btn_settings.move(w - BUTTON_MARGIN - BUTTON_SIZE, btn_y)
 
         # 气泡：始终占满可用宽度（而不是随文字长短忽宽忽窄），
         # 这样短句也够大、长句换行整齐，不会再被头发挤成一小块。
@@ -426,6 +449,19 @@ class PetWindow(Live2DView):
         self.raise_()
         self._update_chrome()
         QTimer.singleShot(700, self._greet)
+        # 等首帧画完再量模型顶部（GL 上下文可用之后才有意义）
+        QTimer.singleShot(1300, self._measure_model_top)
+
+    def _measure_model_top(self) -> None:
+        """实测模型顶部，用于把角标按钮贴到初音头顶上方。"""
+        try:
+            top = self.measure_model_top()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[UI] 测量模型顶部失败：{exc}")
+            return
+        if top:
+            self._model_top = top
+            self._layout_children()
 
     def _greet(self) -> None:
         self.set_emotion("HAPPY")

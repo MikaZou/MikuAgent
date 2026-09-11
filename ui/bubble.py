@@ -22,6 +22,8 @@ class SpeechBubble(QFrame):
     """圆角白色气泡，底部带小三角。内容用打字机逐字显示。"""
 
     typewriter_finished = Signal()
+    # 气泡显示/隐藏时发出，供外层重新排布角标按钮（避免遮挡、也避免留白）
+    visibility_changed = Signal(bool)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -92,6 +94,14 @@ class SpeechBubble(QFrame):
         self.hide()
 
     # ------------------------------------------------------------- 绘制小三角
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self.visibility_changed.emit(True)
+
+    def hideEvent(self, event) -> None:  # noqa: N802
+        super().hideEvent(event)
+        self.visibility_changed.emit(False)
+
     def paintEvent(self, event) -> None:  # noqa: N802
         super().paintEvent(event)
         painter = QPainter(self)
