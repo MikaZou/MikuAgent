@@ -51,10 +51,10 @@
 | UI / 渲染宿主 | PySide6-Essentials | 6.8.3 |
 | Live2D 运行时 | live2d-py（Cubism Native SDK 5.1） | 0.7.0.4 |
 | OpenGL | PyOpenGL | 3.1.10 |
-| LLM | DeepSeek `deepseek-flash`（V4.1-Flash，thinking 关闭） | — |
-| TTS | GSV-TTS-Lite（GPT-SoVITS V2ProPlus） | 0.4.7 |
+| **LLM** | DeepSeek `deepseek-flash`（V4.1-Flash，thinking 关闭） | — |
+| TTS | GSV-TTS-Lite（GPT-SoVITS V2ProPlus）；<br>可切换 MiniMax `speech-2.8-hd`（见 5.5 节） | 0.4.7 |
 | TTS 推理后端 | PyTorch + cu128 | 2.11.0 |
-| STT | faster-whisper（Whisper `small`） | 1.2.1 |
+| STT | faster-whisper（Whisper `small`）；<br>可切换 MiniMax ASR `asr-1.0`（见 5.5 节） | 1.2.1 |
 | 视觉 | DeepSeek 原生多模态 + `opencv-python-headless`（可选） | cv2 5.0 |
 | 记忆 | SQLite | 3 |
 | 音频 | sounddevice / PyAV | 0.5.6 / 17.1.0 |
@@ -980,8 +980,261 @@ t=...   播放结束 ──▶ 回到待机调度
 | 想做独立 App 上架 | **路线 B**，但要有「重写 UI 层 + 换 TTS」的心理准备 |
 | 想两边都能用 | A → C 演进：先把 A 跑通，再把 STT/TTS 逐步下沉到手机 |
 
+> 📌 **前置条件**：无论选哪条路线，**都要先做 5.5 节的 TTS/STT provider 抽象** ——
+> 它是把「本地重计算」换成「云端 API」的唯一入口，也是路线 A/B 的公共地基。
+
 **许可证提醒**：Live2D Cubism SDK 商用需要 [publication license](https://www.live2d.com/en/sdk/license/)，
 个人 / 小规模通常免费，但**上架收费 App 前必须确认**。
+
+### 5.5 TTS / STT 的「本地 ⇄ API」双通道
+
+> 需求来源：GPT-SoVITS 与 Whisper 的资源占用已经让 PC 也吃力（见 4.6 节的 GPU 争用问题），
+> 更是手机化的直接阻碍。需要让用户在**设置界面里自行选择**走本地还是走 API。
+> **本节只写方案，不改代码。**
+
+#### 5.5.1 为什么要做这件事
+
+| 问题 | 本地路径的代价 |
+| --- | --- |
+| **显存** | GPT-SoVITS 常驻约 1.4~2.2GB（见 2.5 节），与桌宠的 OpenGL 渲染争一块 4GB 卡 |
+| **内存** | TTS 服务约 2.9GB + Whisper 约 1GB；本机可用内存常在 3GB 上下 → 已多次触发 OOM |
+| **启动** | 模型加载 + 预热约 35 秒才可发声 |
+| **GPU 互操作** | 已实测到 `CUDA error: unknown error`（4.6 节），本地路径在共享 GPU 上不稳定 |
+| **手机化** | 手机既无显存也无 3GB 可用内存，**本地路径根本走不通**（5.4.3 节） |
+
+**做双通道的收益是叠加的**：PC 上可以立刻卸掉资源压力，
+同时它也是手机路线 A/B 的**前置条件** —— 没有 provider 抽象，换端就得重写。
+
+#### 5.5.2 现状：TTS 有雏形，STT 完全没有
+
+**【代码】** 当前形状：
+
+| 模块 | 已有的抽象 | 缺口 |
+| --- | --- | --- |
+| `backend/tts.py` | 已有 `engine` 概念，`edge` / `sovits` 两种实现，`synthesize()` 内部按 engine 分派，`status` 属性也分了派 | `edge` 只能算「在线但不可选音色」，**没有真正的「云端 + 音色克隆」通道** |
+| `backend/stt.py` | 只有一路：`sd.InputStream` 录音 → `WhisperModel` 本地转写，**模型尺寸写死在 config** | **没有任何 API 通道** |
+
+**关键观察**：STT 其实有两种性质完全不同的工作：
+
+```
+录音（麦克风采集）        转写（音频 → 文本）
+  · 设备层，必须本地        · 计算密集，可以搬到云端
+  · 开销极小               · Whisper small 约 1GB 内存
+  · sounddevice 已封装好   · 这才是要抽象的部分
+```
+
+**所以 STT 的抽象应该只包住「转写」，录音保持在本地。** 这一刀切下去，
+改造量比想象中小得多。
+
+#### 5.5.3 设计：Provider 抽象
+
+**TTS —— 扩展现有的 `engine` 为 provider 表**
+
+```
+TextToSpeech
+├─ provider = local-sovits   现有：GPT-SoVITS 本地推理（默认，音色最准）
+├─ provider = local-edge     现有：edge-tts（微软在线，无克隆）
+├─ provider = api-minimax    新增：MiniMax speech-2.8 + 克隆音色  ← 推荐
+└─ provider = none           关闭
+```
+
+**STT —— 拆成两层**
+
+```
+SpeechToText
+├─ recorder（保持在本地，不抽象）
+│    └─ sounddevice 采集 16kHz 单声道 → 内存缓冲
+└─ transcriber（这一层可切换）
+     ├─ local-whisper    现有：faster-whisper，可以选模型尺寸
+     ├─ api-minimax      新增：MiniMax ASR
+     └─ api-openai       可选：OpenAI Whisper API（生态最通用）
+```
+
+**统一的 provider 契约**（伪接口，用于说明形状，不是最终代码）：
+
+```python
+class TtsProvider:
+    name: str
+    needs_gpu: bool
+    def available(self) -> tuple[bool, str]: ...     # 依赖是否就绪 + 原因
+    def synthesize(self, text: str, emotion: str) -> tuple[Path, float] | None: ...
+    def shutdown(self) -> None: ...
+
+class SttTranscriber:
+    name: str
+    def available(self) -> tuple[bool, str]: ...
+    def transcribe(self, pcm: bytes, sample_rate: int) -> dict: ...
+```
+
+**保留现有对外行为**：`synthesize()` 仍返回 `(Path, float)`，
+`transcribe` 仍返回 `{"text": ...}` / `{"error": ...}`。
+上层的 `TtsPipelineWorker`、`ChatWorker`、`pet_window` **一行都不用改**。
+
+#### 5.5.4 MiniMax 作为推荐 API provider（已核实官方规格）
+
+选它的理由：**一个供应商同时提供 TTS 与 ASR**，音色克隆是官方能力，
+国内可直连，API 是标准 REST。
+
+**TTS —— 同步语音合成**
+
+| 项 | 值 |
+| --- | --- |
+| Endpoint | `POST https://api.minimax.cn/v1/t2a_v2` |
+| 鉴权 | `Authorization: Bearer <API_KEY>` |
+| 模型 | **`speech-2.8-hd`**（最新 HD，情绪渲染融合语气词）/ `speech-2.8-turbo`（极速）<br>另有 `speech-2.6-hd/turbo`、`speech-02-hd/turbo` |
+| 单次上限 | **10,000 字符**（远超我们 `TTS_MAX_CHARS=200`） |
+| 输出格式 | mp3 / pcm / flac / wav |
+| 语种 | 40 种（含中文、日语、粤语） |
+
+请求体关键字段：
+
+```json
+{
+  "model": "speech-2.8-hd",
+  "text": "今天是不是很开心呀(laughs)，当然了！",
+  "stream": false,
+  "voice_setting": {
+    "voice_id": "<克隆得到的 voice_id>",
+    "speed": 1, "vol": 1, "pitch": 0,
+    "emotion": "happy"
+  },
+  "audio_setting": {"sample_rate": 32000, "format": "mp3", "channel": 1}
+}
+```
+
+响应：`{"data": {"audio": "<hex 编码的音频>"}, "extra_info": {"audio_length": 9900, ...}}`
+
+> **两个和我们现有系统天然契合的点**：
+> 1. `voice_setting.emotion` **官方支持情感**（`happy` 等）—— 正好接我们已有的情感标签链路，
+>    比现在 `sovits` 只能改 `speed` 强得多（见 2.6 节「情感→语速效果有限」）
+> 2. `extra_info.audio_length` 直接给出时长（毫秒），**省掉我们本地读 WAV 算时长那一步**；
+>    音频若是 mp3，仍走现有的 PyAV 转 WAV（`_synth_edge` 已有这套逻辑可复用）
+
+**音色克隆（把初音的声音搬上云）**
+
+```
+1. 上传复刻音频   POST /v1/files/upload  → file_id
+     约束：mp3/m4a/wav；时长 10 秒 ~ 5 分钟；≤20MB
+2. (可选) 上传示例音频 → 增强相似度与稳定性（<8 秒）
+3. 快速复刻       → 自定义 voice_id
+4. 用 voice_id 调 t2a_v2 合成
+```
+
+> ⚠️ **两个必须写进用户提示的约束**：
+> 1. **复刻音色是临时的**：若 **168 小时（7 天）内未被任何合成接口使用**，系统会删除该音色。
+>    → 我们的「独立进程 + 启动预热」模式**天然满足**这条（每次启动都会用），
+>    但**长期不启动桌宠就会掉音色**，需要在设置界面提示「音色已过期，请重新克隆」
+> 2. **调用复刻接口前需完成个人或企业认证**（实名）
+
+> 📌 **我们已有的 `assets/voice/miku_ref.wav`（4.2 秒）时长不足 10 秒**，
+> 走 MiniMax 复刻需要重新准备一段 **≥10 秒** 的干净人声。
+> 这正好可以把之前搁置的「用 B 站演唱会视频做 vocal separation」那件事用上。
+
+**ASR —— 语音识别**
+
+| 项 | 值 |
+| --- | --- |
+| Endpoint | `POST https://api.minimaxi.com/v1/speech_to_text` |
+| 请求 | `multipart/form-data` |
+| 模型 | `asr-1.0` |
+| 音频约束 | wav/aiff/flac/alac(m4a)/mp3/aac/opus/ogg；**≤500 秒**；**≤50MB** |
+| 语言提示 | 请求头 `language`，BCP-47（`zh` / `ja` / `en` …）；**不传则混合语言识别** |
+| 返回格式 | `json`（text+duration）/ `verbose_json`（含说话人分离与时间戳）/ `srt` / `vtt` |
+| 流式 | `stream=true` 走 SSE 增量返回 |
+
+> 官方明确提示：**识别不依赖高采样率与立体声**，建议先转单声道 16kHz 或用压缩格式。
+> 我们现在的录音**正好就是单声道 16kHz float32**（`STT_SAMPLE_RATE=16000`、`channels=1`），
+> 只需编码成 wav 或 opus 即可直接上传，**不需要任何重采样**。
+
+#### 5.5.5 设置界面设计
+
+在现有「设置」面板（`ui/settings_dialog.py`）里新增两块。
+现有面板已有「语音输出」「语音输入」「视频对话」三个开关，延续同样的交互范式：
+
+```
+┌─ 语音输出（Miku 说话） ─────────────────────────────┐
+│  [✓] 启用语音输出                                    │
+│  引擎   ( ) 本地 · GPT-SoVITS（音色最准，需 GPU）     │
+│         ( ) 本地 · edge（轻量，无克隆）               │
+│         (•) API · MiniMax（推荐，省显存）             │
+│  状态   就绪 · 音色：Miku-克隆-20260911               │
+│         [测试音色]  [重新克隆音色]                     │
+│  密钥   [sk-··············]（写入 .env）              │
+└─────────────────────────────────────────────────────┘
+
+┌─ 语音输入（按住说话） ───────────────────────────────┐
+│  [✓] 启用语音输入                                    │
+│  转写   ( ) 本地 · Whisper  模型 [small ▾]            │
+│         (•) API · MiniMax ASR                        │
+│  状态   就绪（API）· 上次耗时 0.8s                     │
+└─────────────────────────────────────────────────────┘
+```
+
+**设计要点**：
+
+1. **每个选项都标注资源代价**（"需 GPU" / "省显存"），让用户自己权衡
+2. **`available()` 不通过时显示原因**（如"未安装 opencv" / "未配置密钥"），
+   并把该选项置灰 —— 沿用 `TtsWorker` 现有的 `status` 机制
+3. **API 密钥输入框**：目前密钥只能改 `.env` 重启，设置界面直接可填是明显改进
+4. **一键测试**：合成一句固定话术，让用户当场听出差异（这比文字描述有效得多）
+5. **音色克隆入口**放在设置里（低频操作），**日常切换**放在托盘菜单（高频）
+6. **优雅降级**：API 连续失败 N 次 → 自动回退本地并在气泡里说明（复用现有 `_mock_reply` 的兜底思路）
+
+**配置项**（写进 `.env.example`）：
+
+```ini
+# ===== 语音 provider 选择 =====
+TTS_PROVIDER=local-sovits      # local-sovits | local-edge | api-minimax | none
+STT_TRANSCRIBER=local-whisper  # local-whisper | api-minimax | api-openai
+
+# ===== MiniMax（api-* 时必填）=====
+MINIMAX_API_KEY=
+MINIMAX_GROUP_ID=
+MINIMAX_TTS_MODEL=speech-2.8-hd
+MINIMAX_TTS_VOICE_ID=          # 克隆得到的 voice_id
+MINIMAX_ASR_MODEL=asr-1.0
+```
+
+#### 5.5.6 与手机化路线的适配（回答「怎么和前面的方向配合」）
+
+**这张表是本节的重点** —— provider 抽象不是独立的一件事，它是 5.4 节三条路线的**公共前置**：
+
+| 路线 | TTS provider | STT transcriber | LLM | 说明 |
+| --- | --- | --- | --- | --- |
+| **现在（PC 全本地）** | `local-sovits` | `local-whisper` | DeepSeek API | 资源吃紧，只在这台机器上勉强跑 |
+| **PC 减压（立刻可做）** | **`api-minimax`** | **`api-minimax`** | DeepSeek API | **一步卸掉约 2.4GB 显存 + 3.9GB 内存**，4.6 节的 GPU 争用问题直接消失 |
+| **路线 A 瘦客户端** | `api-minimax`<br>或桌面本地 | `api-minimax`<br>或桌面本地 | DeepSeek API | 手机只做 Live2D + 录制 + 播放；<br>**provider 抽象让「后端在桌面还是云」对手机透明** |
+| **路线 B 全本地 App** | **必须** `api-minimax` | 手机本地 `whisper.cpp`<br>或 `api-minimax` | DeepSeek API | 手机跑不了 GPT-SoVITS；<br>STT 可以用 whisper.cpp 保住离线 |
+| **路线 C 混合** | `api-minimax` | 手机本地 `whisper.cpp` | DeepSeek API | 桌面保留 `local-sovits` 仅用于**音色克隆**（克隆一次，云端长期使用） |
+
+**几个关键结论**：
+
+1. **provider 抽象是手机化的第一块砖**。不做它，路线 A 要把 TTS/STT 的调用点全改一遍；
+   做了它，桌面与手机只是**同一套 provider 契约的两个实现**
+2. **它同时解决了眼前的 PC 问题**。选 `api-minimax` 后：
+   - 显存：`-1.4~2.2GB`（TTS 服务不再需要）
+   - 内存：`-2.9GB`（TTS 服务）+ `-1GB`（Whisper）
+   - 启动：从 35 秒降到 1~2 秒（不用加载模型与预热）
+   - **4.6 节的 `CUDA error` 自然消失**（不再有 CUDA 上下文）
+   - 代价：需要联网 + 按量计费
+3. **桌面端仍有存在价值**：`local-sovits` 用于**音色克隆与 A/B 对比**，
+   毕竟本地克隆不需要上传、不受 7 天过期限制。建议**保留但不默认启用**。
+4. **手机路线 B 的 TTS 别无选择**：目前没有能在手机上跑的 GPT-SoVITS 级别方案，
+   API 是唯一现实路径。这反过来印证了 provider 抽象的必要性。
+
+#### 5.5.7 落地顺序（建议）
+
+| 步骤 | 内容 | 依赖 |
+| --- | --- | --- |
+| **1** | 抽出 `TtsProvider` / `SttTranscriber` 契约，把现有 `edge` / `sovits` / `whisper` **包装成 provider**（行为完全不变） | 无，纯重构 |
+| **2** | 实现 `api-minimax` 两个 provider（TTS + ASR） | MiniMax API Key + 实名认证 |
+| **3** | 设置界面加 provider 选择 + 密钥输入 + 一键测试 | 步骤 1、2 |
+| **4** | 准备 ≥10 秒的参考音频，跑通音色克隆，把 `voice_id` 写进配置 | 步骤 2 |
+| **5** | 优雅降级：API 失败自动回退本地 | 步骤 1~4 |
+| **6** | （手机路线 A）把 provider 层搬到 WebSocket 服务端 | 步骤 1~5 |
+
+> **步骤 1 是关键**：它是**纯重构、零行为变化**，可以先做、单独验证，
+> 不影响任何现有功能。做完之后步骤 2~5 都只是「加一个 provider 实现」。
 
 ---
 
@@ -1143,6 +1396,11 @@ t=...   播放结束 ──▶ 回到待机调度
 - **Soullink Emotion SDK**（LLM/事件驱动的 Live2D 表演引擎，MIT）：<https://github.com/nanlingyin/soullink-emotion-sdk>
 - **Live2D 初音未来免费模型**（UP：玄宝酱）：<https://www.bilibili.com/video/BV1B1Mo67E3g/>
 - **Soullink Emotion SDK 技术演示**（UP：骥南凌音_official）：<https://www.bilibili.com/video/BV1MXKi6NEbR/>
+- **MiniMax 开放平台**（TTS + 音色克隆 + ASR，5.5 节的 API provider）：
+  - 接口概览（含全部语音模型）：<https://platform.minimaxi.com/docs/api-reference/api-overview>
+  - 同步语音合成 HTTP：<https://platform.minimaxi.com/docs/api-reference/speech-t2a-http>
+  - 音色快速复刻：<https://platform.minimaxi.com/docs/guides/speech-voice-clone>
+  - 语音识别 ASR：<https://platform.minimaxi.com/docs/api-reference/speech-to-text>
 - SoulLink_Live2D（LLM 驱动 Live2D 表情控制）：<https://github.com/nanlingyin/SoulLink_Live2D>
 - LLM 表情控制原理文档：<https://github.com/nanlingyin/SoulLink_Live2D/blob/main/docs/LLM_EXPRESSION_PRINCIPLE.md>
 - 纯 JSON 添加动作 + Agent 工作流：<https://github.com/shinshin86/live2d-add-motion-sample-web-ui>
