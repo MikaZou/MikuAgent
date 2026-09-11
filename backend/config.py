@@ -42,7 +42,9 @@ WINDOW_STATE_FILE = DATA_DIR / "window.json"
 
 # 窗口尺寸（透明无边框）
 WINDOW_WIDTH = int(os.getenv("WINDOW_WIDTH", "400"))
-WINDOW_HEIGHT = int(os.getenv("WINDOW_HEIGHT", "580"))
+# 660 而非 580：气泡（最多 132px 高）和输入栏之间要留出完整空间给模型，
+# 实测 580 高度下没有任何缩放能让模型完全避开气泡
+WINDOW_HEIGHT = int(os.getenv("WINDOW_HEIGHT", "660"))
 WINDOW_FPS = int(os.getenv("WINDOW_FPS", "60"))
 
 # ===== 语音输出（TTS） =====

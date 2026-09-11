@@ -24,15 +24,19 @@ from ui.settings_dialog import SettingsDialog
 from ui.tray import Tray
 
 # 模型取景。实测：Resize 后模型底部贴着窗口底边，dy 为正会把模型上移
-# （0.15 ≈ 33 逻辑像素），所以这里用正的 dy 把整体抬起。
-# 同时缩小一点，给顶部气泡和底部输入栏留出干净的空间，避免头发压着气泡。
-FRAMING_SCALE = 0.9
-FRAMING_OFFSET = (0.0, 0.45)
+# （0.15 ≈ 33 逻辑像素）。
+#
+# 这里的数值是用 tools/measure_framing.py 在 400x660 下量出来的，
+# 目的是让模型的包围盒完整落在「气泡下沿(184) ~ 输入栏上沿(584)」之间：
+#   scale 0.85 / dy 0.15  ->  top 203, bottom 576  （完全避开，且左右居中）
+# 窗口高度从 580 提到 660，是因为 580 下**没有任何缩放**能让模型避开气泡。
+FRAMING_SCALE = 0.85
+FRAMING_OFFSET = (0.0, 0.15)
 
-# 布局尺寸
+# 布局尺寸（改这里要同步 tools/measure_framing.py 里的同名常量）
 BUBBLE_MARGIN = 16      # 气泡左右留白
 BUBBLE_TOP = 46         # 气泡距窗口顶部：必须让开上面那排 30px 高的角标按钮
-BUBBLE_MAX_H = 132      # 气泡最大高度，避免长回复一直向下盖住脸
+BUBBLE_MAX_H = 132      # 气泡最大高度；模型按这个上沿来避让
 
 GREETING = "主人你好呀！我是初音ミク☆ 把鼠标移到我身上就能和我说话啦～"
 
