@@ -31,8 +31,8 @@ FRAMING_OFFSET = (0.0, 0.45)
 
 # 布局尺寸
 BUBBLE_MARGIN = 16      # 气泡左右留白
-BUBBLE_TOP = 8          # 气泡距窗口顶部
-BUBBLE_MAX_H = 150      # 气泡最大高度，避免长回复盖住整张脸
+BUBBLE_TOP = 46         # 气泡距窗口顶部：必须让开上面那排 30px 高的角标按钮
+BUBBLE_MAX_H = 132      # 气泡最大高度，避免长回复一直向下盖住脸
 
 GREETING = "主人你好呀！我是初音ミク☆ 把鼠标移到我身上就能和我说话啦～"
 
@@ -157,12 +157,18 @@ class PetWindow(Live2DView):
         # 有焦点或有草稿时钉住输入栏（沿用网页版修好的那套逻辑）
         show_bar = self._hover or self.input_bar.wants_visible
         self.input_bar.setVisible(show_bar)
-        for btn in (self.btn_min, self.btn_close, self.btn_settings):
+        buttons = (self.btn_min, self.btn_close, self.btn_settings)
+        for btn in buttons:
             btn.setVisible(self._hover and self.isVisible())
         if show_bar:
             self.input_bar.raise_()
         if self.bubble.isVisible():
             self.bubble.raise_()
+        # 角标按钮必须最后 raise：气泡是满宽的，早先 bubble.raise_() 会把
+        # 左上角的 ─ / × 和右上角的 ⚙ 盖住，点不到也看不见。
+        for btn in buttons:
+            if btn.isVisible():
+                btn.raise_()
 
     # ---------------------------------------------------------------- 会话
     def _init_session(self) -> None:
