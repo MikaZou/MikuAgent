@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 import os
+import random
 import time
 from pathlib import Path
 from typing import Optional
@@ -77,11 +78,21 @@ class Live2DView(QOpenGLWidget):
         self.model: Optional[live2d.LAppModel] = None
         self.expression_ids: list[str] = []
         self.motion_groups: dict = {}
+        self.param_ids: list[str] = []
 
         # 口型
         self._wav: Optional[WavHandler] = None
         self._speak_fallback = False
         self._speak_start = 0.0
+
+        # 待机动画
+        # 之前只有眨眼在动：动作只在「收到回复」和「点击」时播一次，
+        # 播完就停在默认姿态，没有任何东西持续驱动模型。
+        self.idle_enabled = True
+        self.idle_group = "Idle"
+        self.idle_gap_range = (2.5, 7.0)   # 两次待机动作之间的随机间隔（秒）
+        self._next_idle_at = 0.0           # 0 = 启动后立刻来一个
+        self._breath_t0 = time.time()
 
         # 交互
         self._pressed_in_model = False
@@ -140,6 +151,15 @@ class Live2DView(QOpenGLWidget):
             self.motion_groups = dict(self.model.GetMotionGroups())
         except Exception:  # noqa: BLE001
             self.motion_groups = {}
+        # 参数表：本模型用大写 PARAM_* 命名，与 Cubism 标准名（ParamAngleX 等）
+        # 不一致，很多「标准名」写法会静默失效，所以要先拿到真实 ID 列表。
+        try:
+            self.param_ids = [
+                self.model.GetParameter(i).id
+                for i in range(self.model.GetParameterCount())
+            ]
+        except Exception:  # noqa: BLE001
+            self.param_ids = []
 
         self.startTimer(int(1000 / self.fps))
 
@@ -177,9 +197,15 @@ class Live2DView(QOpenGLWidget):
             return
 
         if self.model is not None:
+            now = time.time()
+
             # 视线跟随鼠标（窗口内坐标）
             local = self.mapFromGlobal(QCursor.pos())
             self.model.Drag(local.x(), local.y())
+
+            # 待机动画：动作播完就接下一个，否则模型会一直僵在默认姿态
+            self._update_idle(now)
+            self._update_breath(now)
 
             if self._wav is not None:
                 if self._wav.Update():
@@ -207,15 +233,75 @@ class Live2DView(QOpenGLWidget):
         self.update()
 
     # ------------------------------------------------------------ 表情 / 动作
-    def play_motion(self, group: str) -> None:
+    def play_motion(self, group: str, priority: Optional[int] = None) -> None:
         if self.model is None or not group:
             return
         try:
             self.model.StartRandomMotion(
-                group=group, priority=live2d.MotionPriority.NORMAL
+                group=group,
+                priority=priority if priority is not None else live2d.MotionPriority.NORMAL,
             )
         except Exception:  # noqa: BLE001
             pass
+
+    def _pick_idle_motion(self) -> Optional[int]:
+        """在 Idle 组里加权挑一个动作序号。
+
+        实测本模型 Idle 组有 3 个：07_点头(1.3s)、14_点头(2.9s)、09_渐入睡眠(21s)。
+        均匀随机的话有 1/3 概率进 21 秒的睡眠动作，又会长时间看着不动。
+        这里用 1/(1+i) 让靠前的（较短的）动作权重大，睡眠动作降到约 18%。
+        """
+        try:
+            count = int(self.motion_groups.get(self.idle_group, 0) or 0)
+        except Exception:  # noqa: BLE001
+            count = 0
+        if count <= 0:
+            return None
+        weights = [1.0 / (1 + i) for i in range(count)]
+        return random.choices(range(count), weights=weights, k=1)[0]
+
+    def _update_idle(self, now: float) -> None:
+        """待机调度：当前动作播完后，隔一小段随机时间再接一个 Idle 动作。
+
+        这是「看着僵」的根因修复 —— 原来动作只在收到回复和点击时各播一次，
+        播完就停在默认姿态。另外实测这个模型的 motion3.json 虽然写了
+        Loop=true，运行时 IsMotionFinished() 仍会在几秒后变 True，并不循环。
+        """
+        if not self.idle_enabled or self.model is None:
+            return
+        try:
+            if not self.model.IsMotionFinished():
+                return              # 正忙着（回复动作 / 点击动作），别抢
+        except Exception:  # noqa: BLE001
+            return
+        if now < self._next_idle_at:
+            return
+        index = self._pick_idle_motion()
+        if index is None:
+            self.play_motion(self.idle_group, priority=live2d.MotionPriority.IDLE)
+        else:
+            try:
+                self.model.StartMotion(
+                    self.idle_group, index, live2d.MotionPriority.IDLE
+                )
+            except Exception:  # noqa: BLE001
+                self.play_motion(self.idle_group, priority=live2d.MotionPriority.IDLE)
+        lo, hi = self.idle_gap_range
+        self._next_idle_at = now + random.uniform(lo, hi)
+
+    def _update_breath(self, now: float) -> None:
+        """手动驱动呼吸。
+
+        这个模型的参数叫 PARAM_BREATH（大写），而 SetAutoBreathEnable() 只认
+        标准名 ParamBreath —— 所以本模型上自动呼吸是**完全失效**的，必须自己驱动。
+        实测 Idle 动作本身并不写 PARAM_BREATH（一直停在 0），所以这里无条件驱动；
+        若将来某个动作真的写了它，动作会在 Update() 里覆盖本值，也不会冲突。
+        """
+        if self.model is None:
+            return
+        # PARAM_BREATH 取值 0~1；频率约 0.22Hz，接近真人静息呼吸
+        phase = (math.sin((now - self._breath_t0) * 1.4) + 1.0) * 0.5
+        self.set_param(phase, "PARAM_BREATH", "ParamBreath")
 
     def set_expression(self, name: Optional[str]) -> None:
         if self.model is None:
@@ -228,21 +314,42 @@ class Live2DView(QOpenGLWidget):
         except Exception:  # noqa: BLE001
             pass
 
+    def resolve_param(self, *candidates: str) -> Optional[str]:
+        """按候选顺序返回第一个真实存在的参数 ID。
+
+        本模型用大写 PARAM_* 命名，和 Cubism 标准名不一致，
+        直接写标准名（如 ParamBrowLY）会静默失效 —— 传 None 也不会报错，
+        只是那行代码什么都不做，很难发现。
+        """
+        for name in candidates:
+            if name in self.param_ids:
+                return name
+        return None
+
+    def set_param(self, value: float, *candidates: str) -> bool:
+        """按候选名设置参数，成功返回 True。"""
+        pid = self.resolve_param(*candidates)
+        if pid is None or self.model is None:
+            return False
+        try:
+            self.model.SetParameterValue(pid, value)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
     def set_emotion(self, emotion: str) -> None:
         """情感标签 → 动作 + 表情（对齐旧版 setEmotion）。"""
         emotion = (emotion or "NORMAL").upper()
         self.play_motion(EMOTION_MOTION.get(emotion, "Idle"))
         self.set_expression(EMOTION_EXPRESSION.get(emotion))
 
-        # 生气时手动压低眉毛
-        if emotion == "ANGRY" and self.model is not None:
-            for pid in ("ParamBrowLY", "ParamBrowRY"):
-                try:
-                    self.model.SetParameterValue(
-                        getattr(live2d.StandardParams, pid), -1.0
-                    )
-                except Exception:  # noqa: BLE001
-                    pass
+        # 生气时手动压低眉毛。
+        # 注意要兼容两种命名，原来写的 ParamBrowLY / ParamBrowRY 在本模型上
+        # 根本不存在，这行代码一直是空转的。
+        if emotion == "ANGRY":
+            for cands in (("PARAM_BROW_L_Y", "ParamBrowLY"),
+                          ("PARAM_BROW_R_Y", "ParamBrowRY")):
+                self.set_param(-1.0, *cands)
 
     # -------------------------------------------------------------- 口型同步
     def start_lipsync(self, wav_path: Optional[str]) -> None:
