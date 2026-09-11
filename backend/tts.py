@@ -84,9 +84,38 @@ def normalize_text(text: str) -> str:
     return out.strip()
 
 
+_SENT_SPLIT = re.compile(r"(?<=[。！？!?；;\n])")
+
+
+def split_sentences(text: str, max_len: int = 40) -> list[str]:
+    """把回复切成适合逐段合成的片段。
+
+    GPT-SoVITS 是「整段合成完才出声」，长回复要等好几秒。
+    按句切开逐段合成/播放，第一句合成完就能开口，首字延迟大幅下降。
+    过短的碎片并入前一段，避免碎成一堆词。
+    """
+    parts = [p.strip() for p in _SENT_SPLIT.split(text or "") if p.strip()]
+    if not parts:
+        return []
+
+    out: list[str] = []
+    for part in parts:
+        # 过长的句子再按逗号切一刀
+        while len(part) > max_len:
+            cut = max(part.rfind("，", 0, max_len), part.rfind(",", 0, max_len))
+            if cut <= 0:
+                break
+            out.append(part[: cut + 1])
+            part = part[cut + 1 :]
+        if out and len(part) < 4:
+            out[-1] += part
+        else:
+            out.append(part)
+    return [s for s in out if s.strip()]
+
+
 # 情感 → (语速, 音调)。复用 agent 已经解析出的情感标签当语气。
-EMOTION_PROSODY = {
-    "HAPPY": ("+8%", "+35Hz"),
+EMOTION_PROSODY = {    "HAPPY": ("+8%", "+35Hz"),
     "SAD": ("-8%", "+10Hz"),
     "ANGRY": ("+6%", "+12Hz"),
     "SURPRISED": ("+6%", "+45Hz"),
@@ -261,12 +290,14 @@ class TextToSpeech:
         if cached.exists() and cached.stat().st_size > 1024:
             from ui.audio import wav_duration
 
+            self._touch(cached)  # 更新 mtime，供 LRU 淘汰判断
             return cached, wav_duration(cached)
 
         with self._lock:
             if cached.exists() and cached.stat().st_size > 1024:
                 from ui.audio import wav_duration
 
+                self._touch(cached)
                 return cached, wav_duration(cached)
             try:
                 if self.engine == "edge":
@@ -283,9 +314,43 @@ class TextToSpeech:
 
         if path is None or not Path(path).exists():
             return None
+        self._evict_cache()
         from ui.audio import wav_duration
 
         return Path(path), wav_duration(Path(path))
+
+    @staticmethod
+    def _touch(path: Path) -> None:
+        try:
+            os.utime(path, None)
+        except OSError:
+            pass
+
+    def _evict_cache(self) -> None:
+        """按最近最少使用把缓存压到 TTS_CACHE_MAX_MB 以内。
+
+        之前缓存只增不减，长期挂着会一直涨。
+        """
+        limit = config.TTS_CACHE_MAX_MB * 1024 * 1024
+        if limit <= 0:
+            return
+        try:
+            files = [f for f in self.cache_dir.glob("*.wav") if f.is_file()]
+            sized = [(f.stat().st_mtime, f.stat().st_size, f) for f in files]
+        except OSError:
+            return
+        total = sum(s for _, s, _ in sized)
+        if total <= limit:
+            return
+        sized.sort(key=lambda t: t[0])  # 最久未用在前
+        for _, size, f in sized:
+            if total <= limit:
+                break
+            try:
+                f.unlink()
+                total -= size
+            except OSError:
+                continue
 
     def _cache_key(self, text: str, emotion: str) -> str:
         rate, pitch = EMOTION_PROSODY.get((emotion or "NORMAL").upper(), (self.base_rate, self.base_pitch))

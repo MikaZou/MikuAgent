@@ -69,6 +69,10 @@ TTS_SERVER_PORT = int(os.getenv("TTS_SERVER_PORT", "18520"))
 TTS_SERVER_TIMEOUT = int(os.getenv("TTS_SERVER_TIMEOUT", "180"))
 # 单次合成的 socket 超时（首次含模型加载，给足时间）
 TTS_SYNTH_TIMEOUT = int(os.getenv("TTS_SYNTH_TIMEOUT", "300"))
+# 启动时是否预热 CUDA graph（多花约 30~40s 启动，换取之后全程稳态速度）
+TTS_WARMUP = os.getenv("TTS_WARMUP", "true").strip().lower() in {"1", "true", "yes", "on"}
+# 合成缓存上限（MB），超出按最近最少使用淘汰
+TTS_CACHE_MAX_MB = int(os.getenv("TTS_CACHE_MAX_MB", "200"))
 
 # GPT-SoVITS 的英文 G2P 会用到 nltk（文本里出现英文单词时触发）。
 # 默认数据目录在用户目录下且国内下载源常连不上，这里固定到项目内。

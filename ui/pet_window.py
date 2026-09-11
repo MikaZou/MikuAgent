@@ -17,7 +17,7 @@ from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QWidget
 import config
 from ui.audio import AudioPlayer
 from ui.bubble import SpeechBubble
-from ui.chat_worker import ChatWorker, TranscribeWorker, TtsWorker
+from ui.chat_worker import ChatWorker, TranscribeWorker, TtsPipelineWorker
 from ui.input_bar import InputBar
 from ui.live2d_view import Live2DView
 from ui.settings_dialog import SettingsDialog
@@ -203,10 +203,11 @@ class PetWindow(Live2DView):
         self._layout_children()
         self._set_busy(False)
 
-        # 语音是异步的，不阻塞输入
+        # 语音异步进行，不阻塞输入。走逐句流水线：
+        # 第一句合成完就出声，不必等整段回复合成完。
         if self._tts_enabled and self._tts_available():
-            self._tts_worker = TtsWorker(self.tts, reply, emotion, self)
-            self._tts_worker.synthesized.connect(self._on_tts_ready)
+            self._tts_worker = TtsPipelineWorker(self.tts, reply, emotion, self)
+            self._tts_worker.chunk_ready.connect(self._on_tts_ready)
             self._tts_worker.failed.connect(lambda msg: print(f"[TTS] {msg}"))
             self._tts_worker.start()
 
@@ -238,6 +239,14 @@ class PetWindow(Live2DView):
         self.start_lipsync(str(path))  # 播放与口型读同一份 WAV → 同步
 
     def stop_speaking(self) -> None:
+        # 先停流水线，否则它会在下一句合成完后继续出声
+        worker = getattr(self, "_tts_worker", None)
+        if worker is not None and worker.isRunning():
+            try:
+                worker.stop()
+                worker.wait(1500)
+            except Exception:  # noqa: BLE001
+                pass
         self.audio.stop()
         self.stop_lipsync()
 
@@ -423,5 +432,17 @@ class PetWindow(Live2DView):
     def closeEvent(self, event) -> None:  # noqa: N802
         self.stop_speaking()
         self._save_geometry()
+        # 注意 self.shutdown() 是 Live2DView 的，收的是渲染。
+        # TTS 的合成服务是独立进程，必须单独收掉，否则退出后它会被孤立，
+        # 一直占着约 1.5GB 显存不放。
+        if getattr(self, "tts", None) is not None:
+            try:
+                self.tts.shutdown()
+            except Exception as exc:  # noqa: BLE001
+                print(f"[TTS] 关闭合成服务失败：{exc}")
         self.shutdown()
         super().closeEvent(event)
+        # 关掉桌宠窗口就等于退出。app.setQuitOnLastWindowClosed(False) 是为托盘设的，
+        # 少了这一句的话，Alt+F4 / 任务栏关闭只会关掉窗口，进程会带着托盘图标
+        # 一直留在后台（还会占着显存）。
+        QApplication.quit()

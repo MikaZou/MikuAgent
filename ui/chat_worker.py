@@ -72,3 +72,58 @@ class TtsWorker(QThread):
                 self.synthesized.emit(str(path), float(duration))
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(str(exc))
+
+
+class TtsPipelineWorker(QThread):
+    """逐句合成 + 依次播放。
+
+    GPT-SoVITS 是「整段合成完才出声」，长回复要干等好几秒。
+    按句切开：第一句合成完就交给主线程播放，同时后台接着合成第二句。
+    这样首字延迟从「整段合成时间」降到「第一句合成时间」。
+    """
+
+    chunk_ready = Signal(str, float)  # (wav_path, duration_sec)
+    all_done = Signal()
+    failed = Signal(str)
+
+    def __init__(self, tts, text: str, emotion: str, parent=None) -> None:
+        super().__init__(parent)
+        self.tts = tts
+        self.text = text
+        self.emotion = emotion
+        self._stop = False
+
+    def stop(self) -> None:
+        self._stop = True
+
+    def run(self) -> None:  # noqa: D102
+        import time
+
+        from tts import split_sentences  # 顶层导入避免循环依赖
+
+        try:
+            sentences = split_sentences(self.text)
+        except Exception:  # noqa: BLE001
+            sentences = [self.text]
+
+        for sentence in sentences:
+            if self._stop:
+                return
+            try:
+                result = self.tts.synthesize(sentence, self.emotion)
+            except Exception as exc:  # noqa: BLE001
+                self.failed.emit(str(exc))
+                continue
+            if self._stop:
+                return
+            if result is None:
+                continue
+            path, duration = result
+            self.chunk_ready.emit(str(path), float(duration))
+            # 等这一段播完再合成下一段（实际播放发生在主线程）
+            deadline = time.time() + duration + 0.08
+            while time.time() < deadline:
+                if self._stop:
+                    return
+                time.sleep(0.05)
+        self.all_done.emit()
