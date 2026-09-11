@@ -248,7 +248,12 @@ EMOTION_EXPRESSION = {"HAPPY": "Saihong", "SURPRISED": "Chijing", ...}
 ## 🛠️ 技术栈
 
 > 📖 **完整技术文档见 [`docs/TECHNICAL.md`](docs/TECHNICAL.md)** —— 涵盖 TTS 与 Live2D 动作的实现原理、
-> 实测性能数据（显存拆解 / 延迟优化）、以及后续扩展（显存优化路径、Agent 驱动的 Live2D 动画可行性）。
+> 实测性能数据（显存拆解 / 延迟优化）、视频对话的实现，以及后续扩展方案
+> （显存优化路径、Agent 驱动的 Live2D 动画可行性）。
+>
+> 🔖 **参考项目笔记见 [技术文档 6.3 节](docs/TECHNICAL.md)** —— 含
+> [Soullink Emotion SDK](https://github.com/nanlingyin/soullink-emotion-sdk)（连续情绪 / FACS / 分层动作混合）、
+> [Live2D 初音未来免费模型](https://www.bilibili.com/video/BV1B1Mo67E3g/)（含授权条款提醒）等。
 
 | 技术 | 版本 | 用途 |
 | --- | --- | --- |

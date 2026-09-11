@@ -644,9 +644,28 @@ GPU 实际占用 2254 MiB（基线 818 MiB，净增约 1436 MiB）
 
 #### 5.2.2 已有开源实现（重要参考）
 
+**Soullink Emotion SDK** — <https://github.com/nanlingyin/soullink-emotion-sdk>（MIT）
+
+> **这是目前最值得研究的参考项目。** 它是 SoulLink_Live2D 作者把同一套思路抽成的
+> 独立 SDK，已经不只是「Demo」，而是工程化的实时表演引擎。详见 **6.3 ①**。
+
+核心是把「收到一句话 → 切一个表情」升级为**连续的情绪与动作状态**：
+
+- **连续情绪 VAD**：用 Valence / Arousal / Dominance 三轴表达情绪方向与强度
+  （对比本项目现在的 7 个离散情感标签）
+- **FACS / AU 表情语义层**：模型无关地描述微笑、皱眉、注视、姿态
+- **分层动作混合**：Idle / Reaction / Speech Performance 三层独立混合，
+  说话层**不抢 LipSync 的嘴部控制权** —— 正好解决「动作与口型打架」
+- **Profile 自动适配**：扫描模型参数生成 `soullink.profile.json` 与覆盖率
+- **可复现调试**：`seed` 固定随机序列
+
+⚠️ **它是 TypeScript / npm 生态，我们的项目是 Python + PySide6，不能直接引入。**
+建议的做法不是「装它」，而是**读架构、把这四件事（VAD / FACS / 分层混合 / Profile 扫描）
+用 Python 实现到我们自己的项目里**。
+
 **SoulLink_Live2D** — <https://github.com/nanlingyin/SoulLink_Live2D>
 
-LLM 驱动的 Live2D 表情/动作控制系统，思路与本需求完全一致。它的关键设计：
+上面那个 SDK 的前身，原理文档写得更细（见 **6.3 ③**）。关键设计：
 
 - **不播放注册动作，而是 LLM 直接生成参数值**
 - 流程：`收集模型参数 → 嵌入 Prompt → LLM 返回 JSON → 范围校验/钳位 → 缓动过渡`
@@ -900,21 +919,150 @@ t=...   播放结束 ──▶ 回到待机调度
 | **窗口尺寸无效** | 改了 `config.py` 窗口还是旧尺寸 | `.env` 覆盖了默认值 | 同步改 `.env` |
 | **内存耗尽** | NVIDIA 驱动失联、系统降级 | 测量脚本在单进程内连跑 4 个模型配置 | 加内存守卫、一次一个配置 |
 
-### 6.3 参考资料
+### 6.3 参考项目笔记
 
+以下三个是本项目后续开发最值得参考的外部资源，附**已核实**的内容与可用性判断。
+
+---
+
+#### ① Soullink Emotion SDK ★ 最相关
+
+- 仓库：<https://github.com/nanlingyin/soullink-emotion-sdk>（MIT）
+- npm：`npm install @soullink-emotion/sdk` · 快速上手也可只装 `@soullink-emotion/engine`
+- 演示视频：<https://www.bilibili.com/video/BV1MXKi6NEbR/>（278s，UP：骥南凌音_official）
+- 同源项目与原理文档：
+  - SoulLink_Live2D：<https://github.com/nanlingyin/SoulLink_Live2D>
+  - LLM 表情控制原理：<https://github.com/nanlingyin/SoulLink_Live2D/blob/main/docs/LLM_EXPRESSION_PRINCIPLE.md>
+
+**它是什么**：面向 Live2D 数字角色的实时表演引擎，把「收到一句话 → 切一个表情」升级成
+**一条连续的情绪与动作状态**：情绪有强度、动作有时序、语音有口型、模型有自己的参数能力。
+
+**核心能力（直接对应本项目的 5.2 节规划）**
+
+| 能力 | 说明 | 与本项目规划的关系 |
+| --- | --- | --- |
+| **连续情绪 VAD** | Valence / Arousal / Dominance 三轴表达情绪方向与强度 | 比我们「7 个情感标签」细腻得多 |
+| **FACS / AU** | 模型无关的表情语义（微笑、皱眉、注视、姿态） | 正是 5.2.4 建议的「语义 DSL」，但更成熟 |
+| **分层动作混合** | Idle / Reaction / Speech Performance 各自独立成层 | 对应我们的 MotionDirector 构想 |
+| 语音口型 ownership | 说话层不抢 LipSync 的嘴部控制权 | 解决了「动作与口型打架」的问题 |
+| **Profile 自动适配** | 扫描模型参数生成 `soullink.profile.json` + 覆盖率 | **正是我们该做的「先探测再映射」** |
+| 可复现调试 | `seed` 固定随机序列 | 便于回归对比 |
+| 渐进式接入 | 不绑定 LLM / Embedding / TTS / UI 框架 | 可只取 engine 一层 |
+
+**工作流**（摘自其 README）：
+
+```
+消息 / 外部事件 / 语音
+   └─▶ 可选语义层（本地规则 / Embedding / OpenAI 兼容 Planner）
+         └─▶ EmotionIntent
+               ├─▶ VAD 情绪状态      ┐
+               ├─▶ FACS / AU 表情     ├─▶ MotionMixer ─▶ ModelProfile 参数映射 ─▶ Live2D Renderer
+               └─▶ Idle/Speech/Reaction┘
+```
+
+**对本项目的可用性判断（重要）**
+
+- ⚠️ **它是 TypeScript / npm 生态，我们是 Python + PySide6，不能直接引入**
+- ✅ 但**设计可以直接搬**：VAD 三轴、FACS 语义层、分层混合、Profile 自动扫描这四点，
+  用 Python 复刻一遍是完全可行的，且不需要 npm
+- ✅ `@soullink-emotion/profile-generator` 的思路（扫模型文件生成参数能力表）
+  我们可以用自己的 `live2d-py` API（`GetParamIds` / `GetParameter` 的 min/max/default）
+  直接实现，见 3.4 节的参数表
+- 💡 若将来愿意引入 Node 侧：它的 `api-client` / `planner-openai` 提供了 HTTP 与
+  OpenAI 兼容接口，理论上可由 Python 通过 HTTP 调用其服务模式
+
+**结论**：**这是目前最值得深入研究的参考项目。** 建议的用法不是「装它」，而是
+**读它的架构，把 VAD + FACS + 分层混合 + Profile 扫描这四件事用 Python 实现到我们自己的项目里**。
+
+---
+
+#### ② Live2D 初音未来免费模型 ★ 可能是现成资源
+
+- 视频：<https://www.bilibili.com/video/BV1B1Mo67E3g/>（62s，UP：玄宝酱）
+- 合集：`miku初音未来免费模型`（共 3 集，含面捕 + 前倾 + 大小变）
+- 首发数据：约 25 万播放 / 6.6 万赞 / 3.8 万收藏
+
+**内容**：UP 主免费发布的 Live2D 初音未来模型，可用于桌宠或 VTS 面捕。
+
+**授权条款（原文摘录，务必遵守）**
+
+> 画师：@玄宝酱　建模：@怂不过三秒-　剪辑：@纱糖sato
+> 该模型唯一作者：玄宝酱 / 怂怂koe
+> 1. 模型可免费使用桌宠或者 vts 面捕使用，但**不可二传二改**
+> 2. **严禁将该模型用于任何商业途径**，严禁直播牟利，严禁使用该模型进行违法行为
+> 3. 如非商用需求发布视频，**需要标明出处**
+> 4. 任何使用该模型进行的商业或违法行为产生的一切法律责任将由使用者自行承担
+
+**⚠️ 与本项目直接相关的法律风险，需要你确认**
+
+本项目是**公开 GitHub 仓库**，`assets/live2d/miku/` 里的模型素材是**随仓库分发**的。
+如果该模型就是从这个免费发布而来，「**不可二传**」这一条意味着
+**当前仓库的公开分发可能不符合其授权**。建议做一件事：
+
+1. 确认当前 `assets/live2d/miku/` 的来源与授权
+2. 若确为「不可二传」的模型 → 把 `assets/live2d/` 移出仓库（加进 `.gitignore`），
+   在 README 写清「请自行获取模型并放入该目录」，与 `assets/voice/` 的处理方式一致
+
+（我**没有**擅自改动仓库，因为无法确认你这个模型的真实来源，这需要你判断。）
+
+**可用性**：模型本身是**动作 + 参数**资源，可以直接替换我们现在的 `miku.model3.json`；
+但替换后**必须**用 `tools/measure_framing.py` 重新量取景，
+并用 `tools/diag_idle.py` 重新核对参数命名（不同模型命名可能不同，见 3.4 节的坑）。
+
+---
+
+#### ③ SoulLink_Live2D 的功能展示视频
+
+- 视频：<https://www.bilibili.com/video/BV1MXKi6NEbR/>（同上，即 Soullink Emotion SDK 演示）
+- 同系列另外两集：
+  - `BV18o6fBSEhk`：SoulLink_Live2D 功能展示（58s）
+  - `BV1Ye6DBYEVk`：基于 LLM api 控制 l2d 皮套的尝试（61s）
+- 配套文档（**强烈建议精读**）：
+  <https://github.com/nanlingyin/SoulLink_Live2D/blob/main/docs/LLM_EXPRESSION_PRINCIPLE.md>
+
+**这份原理文档里最值得抄的四件事**：
+
+1. **参数列表动态注入 Prompt**：模型加载后读取所有参数及 `min/max/默认值`，
+   生成参数说明塞进系统提示词，让 LLM 知道能控制什么
+2. **LLM 返回结构化 JSON**：`{expression, parameters:{参数:数值}, duration}`
+3. **范围校验与钳位**：对 LLM 返回值逐个 `clamp(min, max)`，防幻觉导致模型变形
+4. **物理参数过滤**：排除 `Hair / Ribbon / Skirt / Bust / Sway / Rotation_ / Skinning`
+   —— **与我们实测的 24 个物理输出参数完全吻合**（见 3.4 节）
+
+另外它提到的工程经验也值得借鉴：缓存高频情感的结果、本地预设兜底、
+`temperature` 降到 0.1~0.3 提高参数一致性、批量更新参数减少调用次数。
+
+**与本项目现状的差距**：我们目前的动作逻辑是「7 个情感标签 → 5 个动作组」的**离散映射**
+（见 3.5 节），正是 SoulLink 明确要取代的那套做法。改造成本可控，
+且第 3.7 节列出的 18 个情感混合参数是现成的基础。
+
+---
+
+### 6.4 参考资料
+
+- **Soullink Emotion SDK**（LLM/事件驱动的 Live2D 表演引擎，MIT）：<https://github.com/nanlingyin/soullink-emotion-sdk>
+- **Live2D 初音未来免费模型**（UP：玄宝酱）：<https://www.bilibili.com/video/BV1B1Mo67E3g/>
+- **Soullink Emotion SDK 技术演示**（UP：骥南凌音_official）：<https://www.bilibili.com/video/BV1MXKi6NEbR/>
 - SoulLink_Live2D（LLM 驱动 Live2D 表情控制）：<https://github.com/nanlingyin/SoulLink_Live2D>
 - LLM 表情控制原理文档：<https://github.com/nanlingyin/SoulLink_Live2D/blob/main/docs/LLM_EXPRESSION_PRINCIPLE.md>
 - 纯 JSON 添加动作 + Agent 工作流：<https://github.com/shinshin86/live2d-add-motion-sample-web-ui>
 - Live2D Cubism SDK 官方文档：<https://docs.live2d.com/>
+- DeepSeek Vision 指南：<https://api-docs.deepseek.com/guides/vision>
 - GSV-TTS-Lite：本地 GPT-SoVITS 高性能推理实现
 - live2d-py（Cubism Native SDK 的 Python 绑定）
 
-### 6.4 版权声明
+### 6.5 版权声明
 
 初音未来的音色与形象归 **Crypton Future Media** 所有。
 参考音频 `assets/voice/` 已在 `.gitignore` 中，**不随仓库分发**。
-模型素材的使用请遵守 Live2D 的许可协议。本项目的相关代码仅供本机个人学习。
+
+> ⚠️ **待确认**：`assets/live2d/` 下的模型素材目前**随公开仓库分发**。
+> 若其来源包含「不可二传」条款的免费发布（见 6.3 ②），需要移出仓库。
+> 详见 6.3 ② 的说明。
+
+模型素材的使用请遵守 Live2D 的许可协议与各发布方的授权条款。
+本项目的相关代码仅供本机个人学习。
 
 ---
 
-*文档生成时间：对应提交 `2100fda`*
+*文档生成时间：对应提交 `38a5922`*
