@@ -41,10 +41,11 @@ AVATAR_PATH = ASSETS_DIR / "img" / "miku_avatar.png"
 WINDOW_STATE_FILE = DATA_DIR / "window.json"
 
 # 窗口尺寸（透明无边框）
-WINDOW_WIDTH = int(os.getenv("WINDOW_WIDTH", "400"))
-# 660 而非 580：气泡（最多 132px 高）和输入栏之间要留出完整空间给模型，
-# 实测 580 高度下没有任何缩放能让模型完全避开气泡
-WINDOW_HEIGHT = int(os.getenv("WINDOW_HEIGHT", "660"))
+WINDOW_WIDTH = int(os.getenv("WINDOW_WIDTH", "360"))
+# 高度不能随便减：顶部按钮(40) + 气泡(最多132) + 底部输入栏(70) 是固定开销，
+# 减到 560 以下时模型会被迫骤降一档。360x600 是实测的平衡点，
+# 改尺寸请用 tools/measure_framing.py 重新量取景。
+WINDOW_HEIGHT = int(os.getenv("WINDOW_HEIGHT", "600"))
 WINDOW_FPS = int(os.getenv("WINDOW_FPS", "60"))
 
 # ===== 语音输出（TTS） =====
