@@ -883,6 +883,106 @@ t=...   播放结束 ──▶ 回到待机调度
    真实渲染验证三段式。本项目的对应工具是 `tools/diag_idle.py`（参数幅度验证）
    和 `tools/capture_window.ps1`（真机截图）
 
+### 5.4 手机版可行性
+
+> 起因：看到有人把那个免费 Live2D 初音模型加载进了手机，问本项目能否也做手机版。
+
+#### 5.4.1 先分清两件事
+
+截图里那个水印是 **VTube Studio** —— 它是一个**现成的** Live2D 面捕/展示应用，
+有 [Google Play 版](https://play.google.com/store/apps/details?id=com.denchi.vtubestudio)。
+所以那个人**并没有开发什么**，只是把模型导进 VTube Studio 而已。
+
+| 你的诉求 | 成本 |
+| --- | --- |
+| 「我只是想在手机上看到她」 | **零开发** —— 装 VTube Studio，导入模型即可 |
+| 「我要把 MikuAgent 变成手机 App」 | 需要真正的架构决策，见下 |
+
+#### 5.4.2 Live2D 在手机上完全没问题
+
+**【官方文档】** Live2D Cubism SDK 的平台支持（<https://docs.live2d.com/zh-CHS/cubism-sdk-manual/platform/>）：
+
+| SDK | Android | iOS | 说明 |
+| --- | :---: | :---: | --- |
+| **Native**（OpenGL） | 〇 | 〇 | 纯 C++，自己接平台层 |
+| **Web** | 〇 | 〇 | Chrome/Firefox/Edge/Safari 全支持 |
+| **Java** | 〇 | – | Android 5.0 (API 21) ~ 14.0 (API 34) |
+| **Unity** | 〇 | 〇 | 还含 WebGL / HarmonyOS |
+
+**所以渲染这一层不是障碍，而且有四条官方路线可选。**
+
+#### 5.4.3 真正的三个障碍
+
+| 障碍 | 原因 | 严重度 |
+| --- | --- | --- |
+| **`live2d-py` 上不了手机** | 它是 CPython C 扩展，官方只有 Native / Web / Java / Unity 版，**没有 Python 版** | 决定性的 |
+| **PySide6 不支持 Android / iOS** | Qt for Android 存在但 PySide6 官方不发移动端 wheel | 决定性的 |
+| **GPT-SoVITS 跑不动** | 需要约 2GB 显存 + 3GB 内存；手机既没显存也没这么大可用内存 | 高（但可替换） |
+
+#### 5.4.4 好消息：后端几乎可以全部复用
+
+**【实测】** 本项目的代码分层非常干净：
+
+| 层 | 规模 | 依赖 Qt？ | 手机端可复用性 |
+| --- | --- | --- | --- |
+| `backend/`（agent / memory / persona / stt / tts / config） | **1302 行** | **✅ 完全不依赖** | 逻辑 100% 可搬 |
+| `ui/`（窗口 / Live2D 视图 / 气泡 / 输入栏 …） | 2344 行 | ❌ 全是 Qt + OpenGL | 必须重写 |
+
+> 校验方式：在 `backend/` 里搜 `PySide6|Qt`，只命中两处**注释**（解释为什么 TTS 要独立进程），
+> 没有任何实际依赖。
+
+**这意味着：LLM 调用、记忆库、人设、STT 封装、TTS 客户端逻辑都能照搬，重写的只是「壳」。**
+
+#### 5.4.5 三条路线
+
+**路线 A：瘦客户端（推荐，复用率最高）**
+
+```
+手机（只做渲染 + 采集）              桌面 PC（现有代码几乎不动）
+┌────────────────┐                 ┌──────────────────────────┐
+│ Live2D 渲染     │◀── WebSocket ──▶│ backend/ 全部复用         │
+│ 麦克风 / 摄像头  │   （局域网）     │  · DeepSeek Agent        │
+│ 音频播放        │                 │  · 记忆 SQLite           │
+└────────────────┘                 │  · TTS（用桌面 GPU）      │
+                                   │  · STT（Whisper）        │
+                                   └──────────────────────────┘
+```
+
+- **复用率**：后端 100%；只需加一层 WebSocket/HTTP 服务
+- **手机端**：Web（`pixi-live2d-display`）做成 PWA，或 Unity
+- **有意思的地方**：本项目**刚删掉的 `frontend/` 网页版**，正好可以改造成手机端 ——
+  当初它作为桌面 UI 是多余的，但作为**手机客户端**反而合适
+- **代价**：必须开着电脑、同一局域网
+- **工作量**：一个周末能出原型
+
+**路线 B：全本地手机 App（重写）**
+
+| 组件 | 方案 |
+| --- | --- |
+| Live2D | 官方 SDK for Android(Java) / iOS，或 Unity |
+| STT | **`whisper.cpp`** —— 在手机上跑得很好（tiny/base 模型） |
+| LLM | DeepSeek API（联网） |
+| TTS | **最大问题**：GPT-SoVITS 跑不了，必须换成<br>① 云端 TTS ② 手机端 ONNX 量化小模型 ③ 退回 `edge` |
+| 后端 | 用 Kotlin / Swift / C# 重写 |
+
+- 这**不是移植，是新项目**。`ui/` 2344 行 + 部分 `backend/` 都要重写
+- 好处：不依赖电脑，真正随身
+
+**路线 C：混合** —— 手机本地做 Live2D + STT，LLM 走云，TTS 走云或本地小模型；
+桌面端保留用于音色克隆与记忆管理。
+
+#### 5.4.6 建议
+
+| 目标 | 建议路线 |
+| --- | --- |
+| 只是想手机上看到她 | **装 VTube Studio**，零开发 |
+| 想快速验证手机端体验 | **路线 A**，后端不动，加个 WebSocket + 网页客户端 |
+| 想做独立 App 上架 | **路线 B**，但要有「重写 UI 层 + 换 TTS」的心理准备 |
+| 想两边都能用 | A → C 演进：先把 A 跑通，再把 STT/TTS 逐步下沉到手机 |
+
+**许可证提醒**：Live2D Cubism SDK 商用需要 [publication license](https://www.live2d.com/en/sdk/license/)，
+个人 / 小规模通常免费，但**上架收费 App 前必须确认**。
+
 ---
 
 ## 6. 附录
@@ -1065,4 +1165,4 @@ t=...   播放结束 ──▶ 回到待机调度
 
 ---
 
-*文档生成时间：对应提交 `38a5922`*
+*文档基线：视频对话功能（提交 `38a5922`）之后的版本*
