@@ -97,7 +97,11 @@ class Live2DView(QOpenGLWidget):
             | Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setAttribute(Qt.WidgetAttribute.WA_AlwaysStackOnTop, True)
+        # 注意：这里**不能**设 WA_AlwaysStackOnTop。
+        # 它会让 GL 内容无视正常层叠顺序、永远画在最上面，
+        # 结果气泡 / 角标按钮这些子控件反而被模型盖住（已实测确认：
+        # 设了它之后，模型区域内的子控件像素会被替换成模型颜色）。
+        # 逐像素透明只需要 WA_TranslucentBackground。
         self.setMouseTracking(True)
         self.setWindowTitle("MikuAgent")
         self.setCursor(Qt.CursorShape.ArrowCursor)
