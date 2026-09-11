@@ -17,6 +17,8 @@ from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QWidget
 import config
 from ui.audio import AudioPlayer
 from ui.bubble import SpeechBubble
+from ui.capture import CameraSession, camera_available, capture_clipboard, capture_screen
+from ui.capture_worker import CameraWorker
 from ui.chat_worker import ChatWorker, TranscribeWorker, TtsPipelineWorker
 from ui.input_bar import InputBar
 from ui.live2d_view import Live2DView
@@ -40,6 +42,13 @@ BUBBLE_TOP = 46         # 气泡距窗口顶部：必须让开上面那排角标
 BUBBLE_MAX_H = 132      # 气泡最大高度；模型按这个上沿来避让
 BUTTON_MARGIN = 10      # 角标按钮距窗口边缘
 BUTTON_SIZE = 30        # 角标按钮边长（与 _corner_button 里的 setFixedSize 一致）
+
+# 摄像头预览（视频对话开启时显示）。放左下角：模型是居中 128px 宽，
+# 这块区域与模型、角标按钮、输入栏都不重叠。
+PREVIEW_W = 96
+PREVIEW_H = 72
+PREVIEW_MARGIN = 12
+PREVIEW_BOTTOM_GAP = 6  # 与输入栏顶边的间距
 
 GREETING = "主人你好呀！我是初音ミク☆ 把鼠标移到我身上就能和我说话啦～"
 
@@ -83,6 +92,14 @@ class PetWindow(Live2DView):
         # 初音模型顶部的实测位置（逻辑像素）；用来把角标按钮贴到她头顶上方
         self._model_top: Optional[int] = None
 
+        # 视频对话（视觉）
+        self._video_enabled = SettingsDialog.video_enabled()
+        # 已经配好、等着跟下一条消息一起发出去的画面（JPEG 字节，仅内存）
+        self._pending_image: Optional[bytes] = None
+        self._pending_source = "camera"
+        self._camera: Optional[CameraSession] = None
+        self._camera_worker: Optional[CameraWorker] = None
+
         self.resize(config.WINDOW_WIDTH, config.WINDOW_HEIGHT)
 
         # ---------------- 子控件 ----------------
@@ -96,7 +113,20 @@ class PetWindow(Live2DView):
         self.input_bar.hold_cancelled.connect(self.cancel_voice_input)
         self.input_bar.state_changed.connect(self._update_chrome)
         self.input_bar.set_mic_visible(self._stt_enabled)
+        self.input_bar.video_toggled.connect(self.set_video_enabled)
+        self.input_bar.screen_requested.connect(self.capture_screen_for_reply)
         self.input_bar.hide()  # 初始隐藏，悬停才出现
+
+        # 视频对话的实时预览。位置放在左下角：模型包围盒是居中 128px 宽，
+        # 这块区域与模型、角标按钮、输入栏都不重叠。
+        self.preview = QLabel(self)
+        self.preview.setStyleSheet(
+            "border: 2px solid rgba(57, 197, 187, 0.9); border-radius: 8px;"
+            "background: #000;"
+        )
+        self.preview.setScaledContents(True)
+        self.preview.setToolTip("摄像头预览（仅在视频对话开启时显示）")
+        self.preview.hide()
 
         self.btn_min = self._corner_button("─", "最小化", self.showMinimized)
         self.btn_close = self._corner_button("×", "退出桌宠", self.quit_app)
@@ -110,6 +140,7 @@ class PetWindow(Live2DView):
         self.settings_dialog.nickname_saved.connect(self.save_nickname)
         self.settings_dialog.tts_toggled.connect(self._on_tts_toggled)
         self.settings_dialog.stt_toggled.connect(self._on_stt_toggled)
+        self.settings_dialog.video_toggled.connect(self.set_video_enabled)
         self.tray = Tray(self, self.open_settings, self.quit_app)
         self.tray.show()
 
@@ -117,6 +148,10 @@ class PetWindow(Live2DView):
         self.model_load_failed.connect(self._on_model_load_failed)
         # 气泡出现/消失时重排角标按钮：有气泡就回到顶端，没气泡就贴到初音头顶
         self.bubble.visibility_changed.connect(lambda _visible: self._layout_children())
+
+        # 摄像头可用时才显示 📹；没有摄像头就退化成只有 🖥️ 截屏（零依赖路径）
+        self.input_bar.set_video_visible(camera_available())
+        self.input_bar.set_video_enabled(self._video_enabled)
 
         self._restore_geometry()
         self._init_session()
@@ -171,6 +206,14 @@ class PetWindow(Live2DView):
 
         self.input_bar.setGeometry(12, h - bar_h - 12, w - 24, bar_h)
 
+        # 摄像头预览贴左下角，位于输入栏上方
+        self.preview.setGeometry(
+            PREVIEW_MARGIN,
+            h - bar_h - 12 - PREVIEW_BOTTOM_GAP - PREVIEW_H,
+            PREVIEW_W,
+            PREVIEW_H,
+        )
+
     # ------------------------------------------------------------ 显示/隐藏
     def enterEvent(self, event) -> None:  # noqa: N802
         self._hover = True
@@ -197,6 +240,11 @@ class PetWindow(Live2DView):
         for btn in buttons:
             if btn.isVisible():
                 btn.raise_()
+        # 预览只在交互时露出：悬停或正在说话（视频通话的体感）
+        show_preview = self._video_enabled and (self._hover or self._recording)
+        self.preview.setVisible(show_preview)
+        if show_preview:
+            self.preview.raise_()
 
     # ---------------------------------------------------------------- 会话
     def _init_session(self) -> None:
@@ -216,13 +264,21 @@ class PetWindow(Live2DView):
             return
         self.stop_speaking()
 
+        # 视频模式下打字发送也配一帧，与语音路径保持一致体感。
+        # 语音路径已经在 stop_voice_input() 取好帧了，这里不会重复取。
+        if self._video_enabled and self._pending_image is None:
+            self._take_vision_frame()
+        image = self._consume_pending_image()
+
         self._busy = True
         self.input_bar.set_busy(True)
         self.input_bar.input.clear()
         self.bubble.show_typing()
         self._update_chrome()
 
-        self._chat_worker = ChatWorker(self.agent, self.session_id, text, self)
+        self._chat_worker = ChatWorker(
+            self.agent, self.session_id, text, image, self
+        )
         self._chat_worker.replied.connect(self._on_reply)
         self._chat_worker.failed.connect(self._on_chat_error)
         self._chat_worker.start()
@@ -295,6 +351,112 @@ class PetWindow(Live2DView):
         if not enabled and self._recording:
             self.cancel_voice_input()
 
+    # -------------------------------------------------------------- 视频对话
+    def set_video_enabled(self, enabled: bool) -> None:
+        """开关视频对话。
+
+        开：打开摄像头并启动预览线程（摄像头保持打开，抓帧才够快）。
+        关：停线程 + 释放设备，LED 随之熄灭。
+        """
+        enabled = bool(enabled)
+        if enabled:
+            if self._camera_worker is None and not self._open_camera():
+                return       # 打开失败时 _open_camera 内部已回滚
+            self._video_enabled = True
+        else:
+            if self._camera_worker is not None:
+                self._stop_camera()
+            self._video_enabled = False
+            # 摄像头来源的待发帧作废；截屏来源的保留（那是用户主动截的）
+            if self._pending_source == "camera":
+                self._pending_image = None
+                self.input_bar.set_attached(False)
+
+        self.input_bar.set_video_enabled(self._video_enabled)
+        self._layout_children()
+        self._update_chrome()
+
+    def _open_camera(self) -> bool:
+        if self._camera is None:
+            self._camera = CameraSession()
+        ok, reason = self._camera.open()
+        if not ok:
+            self._video_enabled = False
+            self.input_bar.set_video_enabled(False)
+            self.input_bar.set_video_visible(camera_available())
+            self.bubble.show_message(
+                f"呜…{reason}。要不要改用 🖥️ 截屏给我看？", "SAD", 6000
+            )
+            return False
+
+        self._camera_worker = CameraWorker(self._camera, self)
+        self._camera_worker.frame_ready.connect(self._on_preview_frame)
+        self._camera_worker.failed.connect(self._on_camera_failed)
+        self._camera_worker.start()
+        print("[Vision] 摄像头已打开，视频对话开始")
+        return True
+
+    def _stop_camera(self) -> None:
+        worker = self._camera_worker
+        self._camera_worker = None
+        if worker is not None:
+            try:
+                worker.stop()
+                worker.wait(1500)
+            except Exception:  # noqa: BLE001
+                pass
+        if self._camera is not None:
+            self._camera.close()
+        self.preview.clear()
+        self.preview.hide()
+
+    def _on_preview_frame(self, image) -> None:
+        if self._video_enabled:
+            self.preview.setPixmap(QPixmap.fromImage(image))
+
+    def _on_camera_failed(self, message: str) -> None:
+        """摄像头中途读不到画面（拔掉/被抢占）→ 自动降级回纯文本。"""
+        print(f"[Vision] {message}")
+        self._stop_camera()
+        self._video_enabled = False
+        self.input_bar.set_video_enabled(False)
+        self.bubble.show_message(f"呜…{message}", "SAD", 6000)
+
+    def capture_screen_for_reply(self) -> None:
+        """截屏配到下一条消息上。
+
+        截屏与剪贴板走 Qt 的 GUI 线程亲和接口（QScreen/QClipboard），
+        耗时只有几十毫秒，所以直接在主线程做，不另开线程。
+        """
+        data = capture_screen() or capture_clipboard()
+        if not data:
+            self.bubble.show_message("诶…截屏失败了，换个方式给我看嘛？", "SAD", 4000)
+            return
+        self._pending_image = data
+        self._pending_source = "screen"
+        self.input_bar.set_attached(True, "screen")
+        self.bubble.show_message("好哦，截图收到啦～想让我看什么？", "HAPPY", 4000)
+
+    def _take_vision_frame(self) -> None:
+        """在「说完那一刻」取一帧。
+
+        直接取预览线程缓存的最新帧（最多落后 1/VISION_PREVIEW_FPS 秒），
+        不去抢摄像头设备，所以**不产生任何采集延迟**；拿不到就降级为纯文本。
+        """
+        if not self._video_enabled or self._camera_worker is None:
+            return
+        data = self._camera_worker.take_latest()
+        if data:
+            self._pending_image = data
+            self._pending_source = "camera"
+            self.input_bar.set_attached(True, "camera")
+
+    def _consume_pending_image(self) -> Optional[bytes]:
+        data = self._pending_image
+        self._pending_image = None
+        self.input_bar.set_attached(False)
+        return data
+
     # ---------------------------------------------------------------- 语音输入
     def start_voice_input(self) -> None:
         if not self._stt_enabled or self._recording:
@@ -314,6 +476,9 @@ class PetWindow(Live2DView):
             return
         self._recording = False
         self.input_bar.set_recording(False)
+        # 「说完那一刻」取一帧给 Miku 看。
+        # 读的是预览线程的缓存帧，和下面的 Whisper 转写并行，零额外延迟。
+        self._take_vision_frame()
         self._stt_worker = TranscribeWorker(self.stt, self)
         self._stt_worker.transcribed.connect(self._on_transcribed)
         self._stt_worker.start()
@@ -333,7 +498,10 @@ class PetWindow(Live2DView):
         if text:
             self.input_bar.set_text(text)
             self.send_message(text)
-        elif result.get("error"):
+            return
+        # 没识别出内容：别把刚才那张图留在「待发送」状态，否则下次打字会带上一张过期的画面
+        self._consume_pending_image()
+        if result.get("error"):
             self.bubble.show_message(result["error"], "SAD", 4000)
 
     # ---------------------------------------------------------------- 交互
@@ -451,6 +619,9 @@ class PetWindow(Live2DView):
         QTimer.singleShot(700, self._greet)
         # 等首帧画完再量模型顶部（GL 上下文可用之后才有意义）
         QTimer.singleShot(1300, self._measure_model_top)
+        # 上次退出时视频对话是开着的 → 恢复它（延后一点，先让窗口画出来）
+        if self._video_enabled:
+            QTimer.singleShot(1800, lambda: self.set_video_enabled(True))
 
     def _measure_model_top(self) -> None:
         """实测模型顶部，用于把角标按钮贴到初音头顶上方。"""
@@ -479,6 +650,7 @@ class PetWindow(Live2DView):
     def closeEvent(self, event) -> None:  # noqa: N802
         self.stop_speaking()
         self._save_geometry()
+        self._stop_camera()          # 先放掉摄像头，摄像头 LED 随之熄灭
         # 注意 self.shutdown() 是 Live2DView 的，收的是渲染。
         # TTS 的合成服务是独立进程，必须单独收掉，否则退出后它会被孤立，
         # 一直占着约 1.5GB 显存不放。

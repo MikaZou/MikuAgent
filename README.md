@@ -34,12 +34,13 @@ start.bat
 - **原生 Live2D 渲染**：直接调用 Live2D Cubism Native SDK（Cubism Core 5.1），无 Chromium、无本地端口、无 WebView。支持鼠标注视跟随、点击互动、情感表情（腮红/吃惊/眯眯眼等 exp3）、自动眨眼与呼吸。
 - **真正的透明桌宠窗口**：无边框、逐像素透明、始终置顶、不进任务栏，按住模型即可拖动。
 - **系统托盘**：显示/隐藏、回到屏幕中央、设置、退出。
-- **DeepSeek Agent 大脑**：通过 OpenAI 兼容接口接入 `deepseek-chat`（可换 `deepseek-reasoner`），支持 function calling。
+- **DeepSeek Agent 大脑**：通过 OpenAI 兼容接口接入 `deepseek-flash`（DeepSeek-V4.1-Flash，默认关闭思考模式以保响应速度），支持 function calling；可换 `deepseek-chat` / `deepseek-reasoner`。
 - **角色设定**：完整人设（16 岁虚拟歌姬、活泼元气、喜欢葱和音乐），情感标签（`[HAPPY]` 等）实时驱动 Live2D 表情与动作。
 - **记忆系统**：
   - 短期记忆：每次对话注入最近 20 条消息；
   - 长期记忆：LLM 通过 `write_memory` 工具自动提炼重要信息（姓名、喜好、约定等）存入 SQLite，之后每次对话都会引用；
   - 多会话管理 + 用户昵称记忆，重启不丢失。
+- **视频对话（让 Miku 看见你）**：输入栏 📹 一开，摄像头保持打开并显示实时预览；**每次按住说话松手的那一刻自动抓一帧**，和语音一起发给 Miku，她就能针对你的样子回应。见下方「视频对话」章节。
 - **语音输出（Miku 说话）**：回复自动合成语音播放，**并用真实音频包络驱动口型**（播放与口型读同一份 WAV，天然同步）。支持在线 `edge` 引擎与本地 `sovits` 初音音色引擎。
 - **语音输入（按住说话）**：输入栏 🎤 按钮按住说话，松开自动转写并发送；faster-whisper 本地转写（默认中文），无需 API Key。
 - **离线演示模式**：未配置 API Key 时自动使用本地预设回复，前端功能可完整体验。
@@ -265,11 +266,58 @@ EMOTION_EXPRESSION = {"HAPPY": "Saihong", "SURPRISED": "Chijing", ...}
 
 模型本体：`MIKU.moc3`（moc3 格式 v4）+ `miku.model3.json`（Version 3，Cubism 4 规范），含物理演算、表情（exp3）与 13 组动作（motion3）。
 
+## 🎥 视频对话（让 Miku 看见你）
+
+输入栏那个 📹 按钮就是开关。开启后：
+
+1. 摄像头保持打开，左下角显示实时预览（**指示灯常亮 = 正在工作**）
+2. 你**按住 🎤 说话、松手的那一刻**，自动抓取一帧画面
+3. 这一帧和转写出来的文字一起发给 Miku —— 她就能针对你的样子回应
+
+抓帧读的是预览线程缓存的最新帧（最多落后 200ms），**与 Whisper 转写并行，不增加等待时间**。
+
+### 隐私
+
+- 摄像头**只在视频对话开启期间**打开，关掉按钮立即释放，LED 熄灭
+- **每轮对话只上传 1 帧**，不是持续上传视频流
+- 画面只存在于内存，**不写入本地磁盘**；聊天记录里只保存 `[图片]` 占位符
+- 画面会**上传到 DeepSeek 云端**用于识别 —— 不愿联网就不要开
+
+### 没有摄像头也能用
+
+🖥️ 按钮可以把**当前屏幕截图**发给 Miku（"帮我看看这个报错"之类）。
+这条路径**不需要任何额外依赖**，走 PySide6 自带的截图接口。
+
+想用摄像头需要装可选依赖：
+
+```bat
+pip install -r requirements-vision.txt
+```
+
+（`opencv-python-headless`，约 44MB。用 headless 版是为了不捆绑第二套 Qt 造成冲突。）
+
+### 诊断工具
+
+```bat
+python tools\diag_vision.py camera     # 探测摄像头并抓一帧存到 .diag\ 查看
+python tools\diag_vision.py api        # 验证 DeepSeek 视觉 API 生效 + 量 token 成本
+python tools\diag_vision.py pipeline   # 不需要摄像头的端到端验证
+```
+
 ## ❓ 常见问题
 
 - **看不到 Miku / 窗口一片空白**：先跑 `python tools\smoke_live2d.py` 验证 OpenGL 与模型。若报显卡驱动问题，请更新显卡驱动。
 - **`import PySide6.QtCore` 报 `ERROR_PROC_NOT_FOUND`**：装到了 PySide6 6.11。该版本的 wheel 缺 ICU DLL，请按 `requirements.txt` 约束装回 6.8.x。
 - **回复是「演示模式」**：`.env` 中未配置或未正确配置 `DEEPSEEK_API_KEY`，或 `MOCK_MODE=true`。
+- **回复变短 / 变空 / 很奇怪**：若把 `DEEPSEEK_MODEL` 改成 `deepseek-flash`，务必同时设
+  `DEEPSEEK_THINKING=disabled`。flash **默认开启思考模式** —— 会变慢、**静默忽略 `temperature`**，
+  且 `max_tokens` 偏小时可能只输出推理内容、正文为空。想回退旧模型就把 `DEEPSEEK_MODEL`
+  改回 `deepseek-chat`（旧名仍可用，但不在账号模型列表里，有下线风险）。
+- **📹 点了提示打不开摄像头**：多为被微信 / 腾讯会议等占用，或系统未授予摄像头权限
+  （设置 → 隐私和安全性 → 摄像头）。没有摄像头就改用 🖥️ 截屏。
+- **TTS 合成服务启动失败（日志里是 `CUDA error: unknown error`）**：多见于显存/驱动被其他
+  程序挤占（浏览器、视频会议、游戏）。服务单独运行是正常的（`python backend\tts_server.py`），
+  只有和桌宠争同一块 GPU 时才可能触发。先关掉一些占显存的程序再重启桌宠。
 - **没有声音**：检查系统默认播放设备；在设置里确认「语音输出」已开启。首次使用 `edge` 引擎需要联网。
 - **`sovits` 启动很慢 / 前几句特别慢**：正常。torch 导入约 12 秒、模型加载约 6 秒、
   预热约 12 秒，合计约 35 秒后才可发声；预热完就一直是稳态速度。
@@ -280,6 +328,8 @@ EMOTION_EXPRESSION = {"HAPPY": "Saihong", "SURPRISED": "Chijing", ...}
 - **语音输入没反应 / 转写失败**：首次使用需联网下载 Whisper 模型（默认 `small` 约 460MB）；确认麦克风可用且未被占用；可调整 `.env` 中 `STT_MODEL`（`base` 更轻）与 `STT_LANGUAGE`。
 - **模型下载慢 / 下载失败**：国内网络默认走 `hf-mirror.com` 镜像；可在 `.env` 中设置 `STT_HF_ENDPOINT`（留空 = 官方源）。
 - **想改窗口大小**：调 `.env` 里的 `WINDOW_WIDTH` / `WINDOW_HEIGHT`，模型会自动重新适配。
+  **注意**：改完要用 `python tools\measure_framing.py <宽> <高>` 重新量取景，并同步
+  `ui/pet_window.py` 的 `FRAMING_SCALE` / `FRAMING_OFFSET`，否则气泡会和模型重叠。
 
 ## ⚠️ 说明
 

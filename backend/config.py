@@ -14,11 +14,31 @@ def _flag(name: str) -> bool:
 
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "").strip()
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").strip()
-DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat").strip()
+# deepseek-flash = DeepSeek-V4.1-Flash（2026-09 GA），支持视觉输入且比 deepseek-chat 快。
+# 旧名 deepseek-chat 仍可用，但不在账号模型列表里，有下线风险；需要回退时改这里即可。
+DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-flash").strip()
 DEEPSEEK_TEMPERATURE = float(os.getenv("DEEPSEEK_TEMPERATURE", "0.9"))
+# 思考模式：disabled（默认，快）/ enabled / auto（不发送该参数，用服务端默认）
+# 注意：flash 默认是 enabled，会变慢、且**静默忽略 temperature**；
+# 且 max_tokens 偏小时可能只输出推理内容、正文为空。桌宠场景用 disabled。
+DEEPSEEK_THINKING = os.getenv("DEEPSEEK_THINKING", "disabled").strip().lower()
 
 MAX_HISTORY_MESSAGES = int(os.getenv("MAX_HISTORY_MESSAGES", "20"))
 MOCK_MODE = _flag("MOCK_MODE")
+
+# ===== 视觉（视频对话：让 Miku 看见主人） =====
+# 总开关；实际以设置面板的 QSettings 为准，这里只是默认值
+VISION_ENABLED = _flag("VISION_ENABLED")
+# 摄像头索引（OpenCV 的 device index）
+VISION_CAMERA_INDEX = int(os.getenv("VISION_CAMERA_INDEX", "0"))
+# 图片精细度：low(512x512，最省) / high / original / auto
+# 桌宠场景是「看到人」而非 OCR，low 足够，实测约 192 tokens/张
+VISION_DETAIL = os.getenv("VISION_DETAIL", "low").strip().lower()
+# 发送前等比缩放的最长边（控制体积与 token）
+VISION_MAX_SIDE = int(os.getenv("VISION_MAX_SIDE", "768"))
+VISION_JPEG_QUALITY = int(os.getenv("VISION_JPEG_QUALITY", "80"))
+# 实时预览帧率（仅本地显示，不上传）
+VISION_PREVIEW_FPS = int(os.getenv("VISION_PREVIEW_FPS", "5"))
 
 # ===== 语音输入（STT：按住说话） =====
 # Whisper 模型：tiny / base / small / medium（首次使用自动下载，越大越准越慢）

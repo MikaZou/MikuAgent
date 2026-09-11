@@ -20,15 +20,23 @@ class ChatWorker(QThread):
     replied = Signal(dict)
     failed = Signal(str)
 
-    def __init__(self, agent, session_id: Optional[int], message: str, parent=None) -> None:
+    def __init__(
+        self,
+        agent,
+        session_id: Optional[int],
+        message: str,
+        image: Optional[bytes] = None,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self.agent = agent
         self.session_id = session_id
         self.message = message
+        self.image = image            # JPEG 字节；None = 纯文本
 
     def run(self) -> None:  # noqa: D102
         try:
-            result = self.agent.chat(self.session_id, self.message)
+            result = self.agent.chat(self.session_id, self.message, self.image)
             self.replied.emit(result)
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(str(exc))

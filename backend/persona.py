@@ -46,13 +46,25 @@ BOUNDARY_RULES = """
 - 内容积极向上，不输出有害、暴力、色情内容。
 """
 
+VISION_RULES = """
+【视觉】
+- 你刚刚通过摄像头「看」到了主人此刻的画面，请自然地针对画面内容回应。
+- 看到什么就说什么（例如主人在微笑、穿着什么颜色的衣服、房间里有什么），不要编造画面里没有的东西。
+- 如果画面很暗、看不清或没有人，就俏皮地说明，不要硬猜。
+- 自然地融入对话，不要像在做图像描述任务一样逐条罗列。
+"""
+
 
 def build_system_prompt(
     user_name: Optional[str] = None,
     memory_text: str = "",
     extra_note: str = "",
+    vision: bool = False,
 ) -> str:
-    """根据人设、用户昵称与长期记忆，构建系统提示词。"""
+    """根据人设、用户昵称与长期记忆，构建系统提示词。
+
+    vision=True 时追加视觉规则（仅在本次请求附带图片时启用）。
+    """
     parts = [
         f"你是{PERSONA_NAME}，一位 16 岁的虚拟歌姬。{PERSONA_PROFILE['身份']}",
         "",
@@ -71,7 +83,10 @@ def build_system_prompt(
         parts.append(f"【用户】用户希望被你称为「{user_name}」。")
     if memory_text.strip():
         parts.append(MEMORY_TEMPLATE.format(memory_text=memory_text.strip()))
-    parts += ["", TOOL_RULES.strip(), "", BOUNDARY_RULES.strip()]
+    parts += ["", TOOL_RULES.strip()]
+    if vision:
+        parts += ["", VISION_RULES.strip()]
+    parts += ["", BOUNDARY_RULES.strip()]
     if extra_note.strip():
         parts += ["", extra_note.strip()]
     return "\n".join(parts)

@@ -1,0 +1,16 @@
+# ===== 可选：视频对话（让 Miku 通过摄像头看见主人）=====
+#
+# 只有「摄像头」这一路需要它。不装也能用：设置里仍可开启视觉，
+# 但只能靠 🖥️ 截屏按钮把画面发给 Miku（截屏与剪贴板走 PySide6 自带接口，
+# 零新增依赖）。
+#
+# 为什么是 headless 版：
+#   opencv-python 会捆绑自己的一套 Qt，和本项目用的 PySide6 放在一起容易
+#   出现插件冲突；headless 版不含任何 GUI 代码，只提供 VideoCapture，
+#   正好够用。
+#
+# 为什么不用 QtMultimedia：
+#   它在 PySide6-Addons 里（约 168MB），而本项目刻意只装 Essentials。
+#
+# pip install -r requirements-vision.txt
+opencv-python-headless>=4.9

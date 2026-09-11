@@ -51,10 +51,11 @@
 | UI / 渲染宿主 | PySide6-Essentials | 6.8.3 |
 | Live2D 运行时 | live2d-py（Cubism Native SDK 5.1） | 0.7.0.4 |
 | OpenGL | PyOpenGL | 3.1.10 |
-| LLM | DeepSeek `deepseek-chat`（OpenAI 兼容协议） | — |
+| LLM | DeepSeek `deepseek-flash`（V4.1-Flash，thinking 关闭） | — |
 | TTS | GSV-TTS-Lite（GPT-SoVITS V2ProPlus） | 0.4.7 |
 | TTS 推理后端 | PyTorch + cu128 | 2.11.0 |
 | STT | faster-whisper（Whisper `small`） | 1.2.1 |
+| 视觉 | DeepSeek 原生多模态 + `opencv-python-headless`（可选） | cv2 5.0 |
 | 记忆 | SQLite | 3 |
 | 音频 | sounddevice / PyAV | 0.5.6 / 17.1.0 |
 
@@ -458,7 +459,7 @@ CLICK_MOTIONS = ["Tap", "Tap", "Flick", "FlickUp", "Dance", "Idle"]
 | **四肢参数**<br>（`PARAM_ARM_L_01/R_01`、`PARAM_LEG_L_Z/R_Z`） | 完全未用 | 招手、叉腰、踏步等手势 |
 | **眉毛 X / ANGLE**<br>（`PARAM_BROW_L_X/R_X/L_ANGLE/R_ANGLE`） | 完全未用 | 更细腻的表情（挑眉、困惑） |
 | **`PARAM_NECKTIE`** | 完全未用 | 转身/走动时领带飘动的配合 |
-| **`LoadExtraMotion()`** 运行时加载动作 | 完全未用 | 动态生成动作文件的落地入口（见 4.2.3） |
+| **`LoadExtraMotion()`** 运行时加载动作 | 完全未用 | 动态生成动作文件的落地入口（见 5.2.3） |
 | **`SetPartOpacity()` / `SetPartMultiplyColor()`** | 完全未用 | 部件级特效（脸红叠色、出汗） |
 | **`HitPart()`** 部件级命中检测 | 用 `glReadPixels` 读 alpha 代替 | 更精确的交互（点头发 vs 点脸） |
 | **`StartMotion` 的完成回调**<br>（`onFinishMotionHandler`） | 用 `IsMotionFinished()` 轮询 | 动作串联的精确衔接 |
@@ -470,11 +471,117 @@ CLICK_MOTIONS = ["Tap", "Tap", "Flick", "FlickUp", "Dance", "Idle"]
 
 ---
 
-## 4. 后续需求的可行方案
+## 4. 视频对话（视觉）
 
-### 4.1 TTS 显存优化
+让 Miku 在语音轮次里「看见」主人。对标豆包的行为：**在用户说完话的那一刻抓取单帧**，
+随这一轮对话一起发给模型。模型侧仍是单帧，但采集自动化，形成「视频对话」体感。
 
-#### 4.1.1 现状
+### 4.1 核心数据流
+
+```
+【视频模式开启】
+   按住 🎤 ──▶ stt.start()
+   松开   ──▶ stop_voice_input()        ← 「说完那一刻」
+                ├─▶ TranscribeWorker（Whisper，约 1s）  ┐
+                └─▶ take_latest()（取缓存帧，约 0ms）   ├─▶ 都就绪
+                                                        ┘
+                    ──▶ send_message(text, frame)
+                          │
+                    DeepSeek 多模态请求（1 图 + 文本 + tools）
+                          │
+                    ──▶ [情感标签] 回复 ──▶ Live2D / TTS
+```
+
+**为什么在 `stop_voice_input()` 抓而不是转写完成后抓**：转写要 1 秒左右。在松开瞬间抓帧
+既更贴合「说完那一刻」的画面，又能与转写并行 —— **零额外延迟**。
+
+**为什么不另开 Worker 现抓**：`cv2.VideoCapture` 不是线程安全的。由 `CameraWorker`
+独占设备并持续缓存最新一帧，抓帧时直接读缓存（最多落后 `1/VISION_PREVIEW_FPS` 秒，
+默认 200ms），**不去抢设备**，因此没有采集延迟。
+
+### 4.2 DeepSeek 视觉 API 规格
+
+| 项 | 值 |
+| --- | --- |
+| 支持视觉的模型 | **`deepseek-flash`（DeepSeek-V4.1-Flash）**；`deepseek-v4-pro` **不支持** |
+| 投递方式 | base64 data URL / 外部 URL / Files API `file_id` |
+| 图片格式 | JPEG、PNG、GIF、WebP（按内容嗅探，不看扩展名） |
+| `detail` | `low`（缩到 512×512）/ `high` / `original` / `auto` |
+| 单图上限 | 32 MiB（base64/URL）、64 MiB（Files API） |
+| 请求体上限 | 48 MiB；单请求最多 600 张 |
+| 尺寸上限 | 每边 8192px（≥15 张图时降到 4096px） |
+| **限制** | **图片只能出现在 `user` 消息里**，放进 system/assistant 会返回 400 |
+
+**token 计费**：图片按尺寸折算 token，先做一次归一化 —— 小于约 544×544 的会被**放大**，
+大于的按比例缩到约 1300×1300 的总像素量，因此**单张图有 1024 token 的上限**。
+
+### 4.3 本项目的实现与实测
+
+| 项 | 实现 / 实测 |
+| --- | --- |
+| 投递方式 | base64 data URL（本地文件，最省事） |
+| `detail` | `low` |
+| 发送前处理 | 等比缩放到 `VISION_MAX_SIDE`（默认 768），JPEG 质量 80 |
+| **实测 token 成本** | **约 184~192 tokens/张**（同提示词带图 vs 不带图对照） |
+| 历史存储 | 只存 `f"{文本} [图片]"` 占位符，**绝不存 base64** |
+| 图片落盘 | 无（仅内存） |
+
+**【实测·集成验证】** 造一张合成人像（圆脸 + 眼睛 + 微笑 + 红色衣服）走完整链路：
+
+> `[HAPPY]` 喔～主人今天在笑呢，眼睛圆圆的好可爱☆ 不过画面里只看到一个大大的笑脸和红色的小方块……
+
+她正确描述了画面内容，且情感标签解析、function calling、长期记忆引用都正常。
+
+### 4.4 三路采集
+
+| 来源 | 依赖 | 说明 |
+| --- | --- | --- |
+| 📹 摄像头 | `opencv-python-headless`（**可选**） | 视频模式下常开，`CameraWorker` 独占 |
+| 🖥️ 截屏 | **无**（`QScreen.grabWindow`） | Qt 有 GUI 线程亲和性，故在主线程直接调用 |
+| 📋 剪贴板 | **无**（`QClipboard.image`） | 截屏失败时的兜底 |
+
+**为什么用 headless 版 OpenCV**：`opencv-python` 会捆绑自己的一套 Qt，和本项目的
+PySide6 放一起容易插件冲突；headless 不含 GUI 代码，只提供 `VideoCapture`。
+**为什么不用 QtMultimedia**：它在 `PySide6-Addons` 里（约 168MB），而本项目刻意只装 Essentials。
+
+**踩到的坑**：OpenCV 5.0 的 **DSHOW 后端不支持按索引打开**
+（`backend is generally available but can't be used to capture by index`），
+必须走默认后端（Windows 上是 MSMF）。`CameraSession.open()` 因此按「默认 → MSMF」依次尝试。
+
+**另一个坑**：`camera_available()` 刻意用 `importlib.util.find_spec("cv2")` 而**不 import cv2** ——
+OpenCV 导入时会初始化 OpenCL，在共享 GPU 的机器上可能干扰另一个进程里的 CUDA 推理；
+不用摄像头的用户也不该为它付出启动开销。
+
+### 4.5 隐私设计
+
+- 摄像头**只在视频模式开启期间**打开，关闭立即 `release()`，LED 熄灭
+- **每轮只上传 1 帧**，不是视频流
+- 帧只存在于内存，**不写磁盘、不入库、不打日志**
+- 设置面板明确告知「画面会上传至 DeepSeek 云端用于识别」
+- 默认关闭，状态持久化在 `QSettings`
+
+### 4.6 已知问题：TTS 与桌宠争 GPU
+
+**现象**：桌宠运行期间，合成服务在 `cache_spk_audio` 阶段抛
+`torch.AcceleratorError: CUDA error: unknown error`（在 `ERes2NetV2` 的 `batch_norm` 内核）。
+
+**已确认的事实**：
+- 服务**单独运行完全正常**（`python backend/tts_server.py`，24 秒就绪、预热 11.9 秒）
+- 故障只在**和桌宠（60fps OpenGL 渲染）同时跑**时出现
+- **用 `git stash` 回退到加视觉功能之前的代码，故障完全一样** —— 不是本功能引入的
+- 当时 RAM 4.5GB、显存仅占 565MiB，**不是资源耗尽**
+
+**推断**：WDDM 下 OpenGL 渲染与 CUDA 在同一块 4GB 笔记本 GPU 上的互操作问题，
+或该机曾发生的驱动异常留下的状态降级。**缓解**：关掉占显存的程序后重启桌宠；
+`TTS_USE_BERT=false` 可再省约 0.65GB。
+
+---
+
+## 5. 后续需求的可行方案
+
+### 5.1 TTS 显存优化
+
+#### 5.1.1 现状
 
 **【实测】** 当前生产配置（`use_bert=true`，fp16，CUDA）显存构成：
 
@@ -487,7 +594,7 @@ GPU 实际占用 2254 MiB（基线 818 MiB，净增约 1436 MiB）
 └─ BERT（推理时按需加载，常驻）          +0.65 GB【早期实测】
 ```
 
-#### 4.1.2 优化路径
+#### 5.1.2 优化路径
 
 按「收益 / 风险」排序：
 
@@ -504,7 +611,7 @@ GPU 实际占用 2254 MiB（基线 818 MiB，净增约 1436 MiB）
 **【推断】** 措施 1 是**唯一确定收益且零风险**的一项，建议先做。
 措施 2~4 需要用 `tools/measure_vram.py` 逐个测（**注意一次只跑一个配置**，见 2.5 的警告）。
 
-#### 4.1.3 延迟优化（剩余空间）
+#### 5.1.3 延迟优化（剩余空间）
 
 | 措施 | 预期 | 复杂度 |
 | --- | --- | --- |
@@ -519,11 +626,11 @@ GPU 实际占用 2254 MiB（基线 818 MiB，净增约 1436 MiB）
 `WavHandler` 的文件读取），是对 `ui/audio.py` 和口型链路的较大改动。
 逐句流水线已拿到大部分收益（首字 1.52 秒），因此当时判断风险收益比不划算。
 
-### 4.2 Agent 驱动的 Live2D 动画
+### 5.2 Agent 驱动的 Live2D 动画
 
 这是本次调研的核心问题。结论：**可行，而且已有成熟的开源先例。**
 
-#### 4.2.1 核心洞察
+#### 5.2.1 核心洞察
 
 **Live2D「动作」= 已知参数集上的一组时间关键帧，不是视频、不是网格动画。**
 
@@ -535,7 +642,7 @@ GPU 实际占用 2254 MiB（基线 818 MiB，净增约 1436 MiB）
 3. **可以纯程序生成，不需要 Cubism Editor**。动作文件就是 JSON，
    已经有人做出「只用文本编辑器 + AI Agent 加动作」的完整工具链。
 
-#### 4.2.2 已有开源实现（重要参考）
+#### 5.2.2 已有开源实现（重要参考）
 
 **SoulLink_Live2D** — <https://github.com/nanlingyin/SoulLink_Live2D>
 
@@ -563,7 +670,7 @@ LLM 驱动的 Live2D 表情/动作控制系统，思路与本需求完全一致�
 **Bunraku**（论文）— 从单张插画生成可编辑的 Live2D 角色。属于「自动化绑定（rigging）」方向，
 与本需求不同（我们要的是动作而非模型），但说明**建模环节**也在被自动化。
 
-#### 4.2.3 三层方案对比
+#### 5.2.3 三层方案对比
 
 | 层 | 做法 | 可控性 | LLM 难度 | 适用 |
 | --- | --- | --- | --- | --- |
@@ -591,7 +698,7 @@ GetPartIds() / SetPartOpacity() / SetPartMultiplyColor() / SetPartScreenColor()
 `LoadExtraMotion` 的存在意味着 **L3 完全可行** —— 可以先在临时目录写一个
 `.motion3.json`，再注册进模型并播放。
 
-#### 4.2.4 推荐架构
+#### 5.2.4 推荐架构
 
 **【推断】** 建议采用 **L1 + L2 为主、L3 为补充** 的混合方案：
 
@@ -681,7 +788,7 @@ BEAT_MAP = {
 > `PARAM_MOUTH_FORM`（微笑嘴型）—— **该参数在本模型不存在**。
 > 这类错误不会报错、只会静默无效，所以 beat 表**必须**由运行时探测生成，不能手写死。
 
-#### 4.2.5 与对话协同的时序设计
+#### 5.2.5 与对话协同的时序设计
 
 **【推断】** 关键在于**并行**与**对齐**：
 
@@ -707,7 +814,7 @@ t=...   播放结束 ──▶ 回到待机调度
 4. **失败兜底**：`motion_plan` 解析失败 → 退回当前的 `EMOTION_MOTION` 静态映射
 5. **缓存**：`(emotion, beat 序列)` 做 LRU，高频情绪不必每次调 LLM
 
-#### 4.2.6 成本与延迟控制
+#### 5.2.6 成本与延迟控制
 
 | 方案 | 额外延迟 | 额外成本 | 说明 |
 | --- | --- | --- | --- |
@@ -719,9 +826,9 @@ t=...   播放结束 ──▶ 回到待机调度
 与 `reply` / `emotion` 一次产出。这样零额外延迟、零额外成本，
 与当前「情感标签复用同一次调用」的设计一脉相承。
 
-### 4.3 「模型直接生成动画」的边界
+### 5.3 「模型直接生成动画」的边界
 
-#### 4.3.1 能做到的（按难度递增）
+#### 5.3.1 能做到的（按难度递增）
 
 | 层级 | 内容 | 可行性 | 依据 |
 | --- | --- | --- | --- |
@@ -732,7 +839,7 @@ t=...   播放结束 ──▶ 回到待机调度
 | ⚠️ 有难度 | **风格化/表演性**动作（唱歌跳舞） | 需数据 | 需在动捕或人工标注的动作库上训练 |
 | ❌ 不可行 | 生成**新模型本体**（`.moc3`、网格、ArtMesh） | 需建模工具 | 见下 |
 
-#### 4.3.2 做不到的
+#### 5.3.2 做不到的
 
 **LLM 无法直接生成 Live2D 模型本体**，原因是：
 
@@ -745,7 +852,7 @@ t=...   播放结束 ──▶ 回到待机调度
 **结论**：**动作可以生成，模型不能。** 对当前项目而言，这不构成障碍 ——
 我们已经有 Miku 的模型，缺的只是动作的丰富度，而这恰好是可生成的部分。
 
-#### 4.3.3 需要注意的工程约束
+#### 5.3.3 需要注意的工程约束
 
 **【实测 + 参考】** 生成动画时必须遵守：
 
@@ -759,13 +866,15 @@ t=...   播放结束 ──▶ 回到待机调度
 
 ---
 
-## 5. 附录
+## 6. 附录
 
-### 5.1 工具清单
+### 6.1 工具清单
 
 | 工具 | 用途 |
 | --- | --- |
 | `tools/measure_framing.py` | 测量模型在指定窗口尺寸下的包围盒，用于精确摆放气泡与模型 |
+| `tools/diag_vision.py` | 视觉诊断：摄像头探测 / API 视觉验证 / 合成画面的端到端链路 |
+| `tools/ui_probe.py` | 轻量 UI 夹具（不加载 TTS/STT），内存吃紧时验证界面布局 |
 | `tools/analyze_motions.py` | 解析全部动作的分组/时长/曲线规模，展示 motion3.json 结构 |
 | `tools/measure_vram.py` | TTS 显存/内存逐组件拆解（**含内存守卫，一次只跑一个配置**） |
 | `tools/diag_idle.py` | 诊断待机动画：呼吸/头身参数是否在动 |
@@ -776,10 +885,13 @@ t=...   播放结束 ──▶ 回到待机调度
 | `tools/selftest_chat.py` | 端到端自检（走 `close()` 以便触发 TTS 清理） |
 | `tools/capture_window.ps1` | 按 PID 定位窗口并截图（EnumWindows） |
 
-### 5.2 本会话踩过的坑（按代价排序）
+### 6.2 本会话踩过的坑（按代价排序）
 
 | 坑 | 现象 | 根因 | 修法 |
 | --- | --- | --- | --- |
+| **内存耗尽** | NVIDIA 驱动失联、系统降级 | 测量脚本在单进程内连跑 4 个模型配置 | 加内存守卫、一次一个配置 |
+| **OpenCV 5.0 不能按索引开摄像头** | `VideoCapture(0, CAP_DSHOW)` 全部失败 | DSHOW 后端不支持索引 | 改用默认后端（MSMF）并加回退链 |
+| **启动时 import cv2 的副作用** | 可能干扰另一进程的 CUDA 推理 | OpenCV 导入会初始化 OpenCL | 改用 `importlib.util.find_spec` 只探测 |
 | **`WA_AlwaysStackOnTop`** | 气泡/按钮被模型盖住 | 该属性让 GL 内容无视层叠顺序永远置顶 | 删除该属性；用最小复现确认 |
 | **参数名静默失效** | 生气压眉毛、自动呼吸都不生效，也不报错 | 模型用 `PARAM_*`，代码写的是 Cubism 标准名 | `resolve_param()` 候选名解析 |
 | **动作无调度** | 待机只有眨眼在动 | 动作只在回复/点击时播一次，播完无接续 | `_update_idle()` 轮询接续 |
@@ -788,7 +900,7 @@ t=...   播放结束 ──▶ 回到待机调度
 | **窗口尺寸无效** | 改了 `config.py` 窗口还是旧尺寸 | `.env` 覆盖了默认值 | 同步改 `.env` |
 | **内存耗尽** | NVIDIA 驱动失联、系统降级 | 测量脚本在单进程内连跑 4 个模型配置 | 加内存守卫、一次一个配置 |
 
-### 5.3 参考资料
+### 6.3 参考资料
 
 - SoulLink_Live2D（LLM 驱动 Live2D 表情控制）：<https://github.com/nanlingyin/SoulLink_Live2D>
 - LLM 表情控制原理文档：<https://github.com/nanlingyin/SoulLink_Live2D/blob/main/docs/LLM_EXPRESSION_PRINCIPLE.md>
@@ -797,7 +909,7 @@ t=...   播放结束 ──▶ 回到待机调度
 - GSV-TTS-Lite：本地 GPT-SoVITS 高性能推理实现
 - live2d-py（Cubism Native SDK 的 Python 绑定）
 
-### 5.4 版权声明
+### 6.4 版权声明
 
 初音未来的音色与形象归 **Crypton Future Media** 所有。
 参考音频 `assets/voice/` 已在 `.gitignore` 中，**不随仓库分发**。

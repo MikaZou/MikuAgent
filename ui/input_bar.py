@@ -18,6 +18,12 @@ from PySide6.QtWidgets import (
 
 DEFAULT_PLACEHOLDER = "和 Miku 说点什么吧…"
 LISTENING_PLACEHOLDER = "聆听中…松开结束"
+ATTACHED_PLACEHOLDER = "📎 已配好一张图，发送时一起给 Miku 看"
+
+# 图标按钮固定尺寸。QToolButton 默认会把 emoji 按钮撑到 44px 以上，
+# 输入栏总宽只有 336px，四个按钮一排会把输入框挤到 105px（太窄）。
+ICON_BTN_SIZE = 32
+LAYOUT_SPACING = 5
 
 
 class ChatLineEdit(QLineEdit):
@@ -88,6 +94,9 @@ class InputBar(QFrame):
     hold_finished = Signal()
     hold_cancelled = Signal()
     state_changed = Signal()
+    video_toggled = Signal(bool)
+    screen_requested = Signal()
+    clear_image_requested = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -113,7 +122,7 @@ class InputBar(QFrame):
             #sendButton {
                 border: none;
                 border-radius: 11px;
-                padding: 9px 18px;
+                padding: 9px 12px;
                 font-size: 14px;
                 font-weight: 600;
                 color: #ffffff;
@@ -124,7 +133,7 @@ class InputBar(QFrame):
             #micButton {
                 border: none;
                 border-radius: 11px;
-                padding: 6px 10px;
+                padding: 6px 6px;
                 font-size: 16px;
                 background: rgba(57, 197, 187, 0.14);
             }
@@ -133,8 +142,30 @@ class InputBar(QFrame):
                 background: #ef4444;
                 color: #ffffff;
             }
+            #videoButton, #screenButton {
+                border: none;
+                border-radius: 11px;
+                padding: 5px 6px;
+                font-size: 15px;
+                background: rgba(57, 197, 187, 0.14);
+            }
+            #videoButton:hover, #screenButton:hover {
+                background: rgba(57, 197, 187, 0.28);
+            }
+            #videoButton[video="true"] {
+                background: #ef4444;
+                color: #ffffff;
+            }
+            #videoButton[attached="true"], #screenButton[attached="true"] {
+                background: #39c5bb;
+                color: #ffffff;
+            }
             """
         )
+
+        self._recording = False
+        self._attached = False
+        self._screen_allowed = True
 
         self.input = ChatLineEdit(self)
         self.input.setObjectName("chatInput")
@@ -144,9 +175,29 @@ class InputBar(QFrame):
 
         self.mic = MicButton(self)
         self.mic.setObjectName("micButton")
+        self.mic.setFixedSize(ICON_BTN_SIZE, ICON_BTN_SIZE)
         self.mic.hold_started.connect(self._on_hold_started)
         self.mic.hold_finished.connect(self._on_hold_finished)
         self.mic.hold_cancelled.connect(self._on_hold_cancelled)
+
+        # 视频对话：开着的时候每秒抓几次画面，说话结束时自动配一张给 Miku 看
+        self.video = QToolButton(self)
+        self.video.setObjectName("videoButton")
+        self.video.setText("📹")
+        self.video.setCheckable(True)
+        self.video.setFixedSize(ICON_BTN_SIZE, ICON_BTN_SIZE)
+        self.video.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.video.setToolTip("视频对话：让 Miku 在每轮语音里看见你")
+        self.video.toggled.connect(self.video_toggled.emit)
+
+        # 截屏发给 Miku（没有摄像头时也能用；视频模式开着时让位给它）
+        self.screen = QToolButton(self)
+        self.screen.setObjectName("screenButton")
+        self.screen.setText("🖥️")
+        self.screen.setFixedSize(ICON_BTN_SIZE, ICON_BTN_SIZE)
+        self.screen.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.screen.setToolTip("把当前屏幕截图发给 Miku")
+        self.screen.clicked.connect(self.screen_requested.emit)
 
         self.send = QPushButton("发送", self)
         self.send.setObjectName("sendButton")
@@ -155,8 +206,10 @@ class InputBar(QFrame):
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(8)
+        layout.setSpacing(LAYOUT_SPACING)
         layout.addWidget(self.input, 1)
+        layout.addWidget(self.screen)
+        layout.addWidget(self.video)
         layout.addWidget(self.mic)
         layout.addWidget(self.send)
 
@@ -190,11 +243,53 @@ class InputBar(QFrame):
         self.hold_cancelled.emit()
 
     # ------------------------------------------------------------------ 状态
+    @staticmethod
+    def _restyle(widget) -> None:
+        """改过动态属性（如 recording/video）之后要重新上样式。"""
+        widget.style().unpolish(widget)
+        widget.style().polish(widget)
+
+    def _refresh_placeholder(self) -> None:
+        if self._recording:
+            self.input.setPlaceholderText(LISTENING_PLACEHOLDER)
+        elif self._attached:
+            self.input.setPlaceholderText(ATTACHED_PLACEHOLDER)
+        else:
+            self.input.setPlaceholderText(DEFAULT_PLACEHOLDER)
+
     def set_recording(self, on: bool) -> None:
+        self._recording = bool(on)
         self.mic.setProperty("recording", "true" if on else "false")
-        self.mic.style().unpolish(self.mic)
-        self.mic.style().polish(self.mic)
-        self.input.setPlaceholderText(LISTENING_PLACEHOLDER if on else DEFAULT_PLACEHOLDER)
+        self._restyle(self.mic)
+        self._refresh_placeholder()
+
+    def set_video_enabled(self, on: bool) -> None:
+        """同步视频按钮状态（blockSignals 避免与上层形成回环）。"""
+        self.video.blockSignals(True)
+        self.video.setChecked(bool(on))
+        self.video.blockSignals(False)
+        self.video.setProperty("video", "true" if on else "false")
+        self._restyle(self.video)
+        # 视频模式开着时画面来自摄像头，把截屏按钮收起来省地方
+        self.screen.setVisible(self._screen_allowed and not on)
+
+    def set_video_visible(self, visible: bool, screen_allowed: bool = True) -> None:
+        """摄像头可用时才显示 📹；没有摄像头则退化为只有 🖥️ 截屏。"""
+        self._screen_allowed = bool(screen_allowed)
+        self.video.setVisible(visible)
+        self.screen.setVisible(self._screen_allowed and not self.video.isChecked())
+
+    def set_attached(self, has_image: bool, source: str = "camera") -> None:
+        """标记「已经配好一张图，下次发送会带上」。"""
+        self._attached = bool(has_image)
+        for widget in (self.video, self.screen):
+            widget.setProperty("attached", "false")
+            self._restyle(widget)
+        if has_image:
+            target = self.screen if source == "screen" else self.video
+            target.setProperty("attached", "true")
+            self._restyle(target)
+        self._refresh_placeholder()
 
     def set_busy(self, busy: bool) -> None:
         self.send.setEnabled(not busy)

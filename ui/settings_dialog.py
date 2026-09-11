@@ -13,6 +13,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+import config
+
 ORG = "MikuAgent"
 APP = "MikuAgent"
 
@@ -23,6 +25,7 @@ class SettingsDialog(QDialog):
     nickname_saved = Signal(str)
     tts_toggled = Signal(bool)
     stt_toggled = Signal(bool)
+    video_toggled = Signal(bool)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -50,6 +53,7 @@ class SettingsDialog(QDialog):
 
         self._tts_check = QCheckBox("启用语音输出（Miku 说话）")
         self._stt_check = QCheckBox("启用语音输入（按住说话）")
+        self._video_check = QCheckBox("视频对话（让 Miku 在每轮语音里看见你）")
         self._nickname = QLineEdit()
         self._nickname.setPlaceholderText("例如：主人 / 小名")
         save_btn = QPushButton("保存称呼")
@@ -73,6 +77,15 @@ class SettingsDialog(QDialog):
 
         root.addWidget(self._tts_check)
         root.addWidget(self._stt_check)
+        root.addWidget(self._video_check)
+
+        vision_tip = QLabel(
+            "📷 开启后摄像头会保持打开（指示灯常亮），但只在你说完话的那一刻抓一帧上传给 DeepSeek，"
+            "不是持续上传。画面不写入本地磁盘。"
+        )
+        vision_tip.setObjectName("tip")
+        vision_tip.setWordWrap(True)
+        root.addWidget(vision_tip)
 
         nick_row = QHBoxLayout()
         nick_row.addWidget(QLabel("称呼"))
@@ -88,6 +101,7 @@ class SettingsDialog(QDialog):
         save_btn.clicked.connect(self._on_save_nickname)
         self._tts_check.toggled.connect(self._on_tts)
         self._stt_check.toggled.connect(self._on_stt)
+        self._video_check.toggled.connect(self._on_video)
         self._loading = False
 
     # ------------------------------------------------------------------ 数据
@@ -117,6 +131,9 @@ class SettingsDialog(QDialog):
 
         self._tts_check.setChecked(bool(self.settings.value("tts_enabled", True, type=bool)))
         self._stt_check.setChecked(bool(self.settings.value("stt_enabled", True, type=bool)))
+        self._video_check.setChecked(
+            bool(self.settings.value("video_enabled", config.VISION_ENABLED, type=bool))
+        )
         self._nickname.setText(nickname or "")
         self._loading = False
 
@@ -130,6 +147,11 @@ class SettingsDialog(QDialog):
         if not self._loading:
             self.stt_toggled.emit(checked)
 
+    def _on_video(self, checked: bool) -> None:
+        self.settings.setValue("video_enabled", checked)
+        if not self._loading:
+            self.video_toggled.emit(checked)
+
     def _on_save_nickname(self) -> None:
         self.nickname_saved.emit(self._nickname.text().strip())
 
@@ -140,3 +162,7 @@ class SettingsDialog(QDialog):
     @staticmethod
     def stt_enabled() -> bool:
         return bool(QSettings(ORG, APP).value("stt_enabled", True, type=bool))
+
+    @staticmethod
+    def video_enabled() -> bool:
+        return bool(QSettings(ORG, APP).value("video_enabled", config.VISION_ENABLED, type=bool))

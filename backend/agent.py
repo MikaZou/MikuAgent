@@ -1,4 +1,5 @@
 """DeepSeek Agent：对话大脑 + 情感标签解析 + 长期记忆写入。"""
+import base64
 import json
 import random
 import re
@@ -113,8 +114,50 @@ class MikuAgent:
     def live(self) -> bool:
         return self.client is not None and not config.MOCK_MODE
 
-    def chat(self, session_id: Optional[int], user_message: str) -> dict:
-        """处理一轮对话，返回 {reply, emotion, session_id, mock, session_title}。"""
+    # ------------------------------------------------------------ 请求构造
+    def _base_kwargs(self) -> dict:
+        """公共请求参数：模型、温度、思考模式。
+
+        DEEPSEEK_THINKING=auto 时不下发该参数（用服务端默认）。
+        注意：思考模式下 temperature 会被静默忽略，所以桌宠默认 disabled。
+        """
+        kw: dict = {"model": self.model, "temperature": self.temperature}
+        if config.DEEPSEEK_THINKING in ("enabled", "disabled"):
+            kw["extra_body"] = {"thinking": {"type": config.DEEPSEEK_THINKING}}
+        return kw
+
+    @staticmethod
+    def _user_content(text: str, image: Optional[bytes]):
+        """构造 user 消息的 content。
+
+        带图时返回块数组。**图片只能出现在 user 消息里** —— 放进 system
+        或 assistant 会被 API 拒绝（400）。
+        """
+        if not image:
+            return text
+        b64 = base64.b64encode(image).decode("ascii")
+        return [
+            {"type": "text", "text": text},
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:image/jpeg;base64,{b64}",
+                    "detail": config.VISION_DETAIL,
+                },
+            },
+        ]
+
+    def chat(
+        self,
+        session_id: Optional[int],
+        user_message: str,
+        image: Optional[bytes] = None,
+    ) -> dict:
+        """处理一轮对话，返回 {reply, emotion, session_id, mock, session_title}。
+
+        image 为 JPEG 字节时走多模态；图片只作用于**当前这一轮**，
+        历史里只留文本占位符（不落盘、不入库）。
+        """
         session = self.memory.get_session(session_id) if session_id else None
         if session is None:
             session = self.memory.create_session()
@@ -125,20 +168,24 @@ class MikuAgent:
             f"- [{m['category']}] {m['content']}" for m in memories
         )
         user_name = self.memory.get_meta("user_name") or None
-        system_prompt = build_system_prompt(user_name=user_name, memory_text=memory_text)
+        system_prompt = build_system_prompt(
+            user_name=user_name, memory_text=memory_text, vision=bool(image)
+        )
 
         if not self.live:
             reply_text, emotion = self._mock_reply(user_message)
         else:
             try:
                 reply_text, emotion = self._ask_deepseek(
-                    system_prompt, history, user_message
+                    system_prompt, history, user_message, image
                 )
             except Exception as exc:
                 print(f"[MikuAgent] DeepSeek 调用失败，回退演示模式: {exc}")
                 reply_text, emotion = self._mock_reply(user_message, error=True)
 
-        self.memory.add_message(session["id"], "user", user_message)
+        # 历史只存文本 + 占位符：图片是 base64 大字符串，入库既臃肿又涉及隐私
+        stored = f"{user_message} [图片]" if image else user_message
+        self.memory.add_message(session["id"], "user", stored)
         self.memory.add_message(
             session["id"], "assistant", reply_text, emotion=emotion
         )
@@ -152,6 +199,7 @@ class MikuAgent:
             "emotion": emotion,
             "session_id": session["id"],
             "mock": not self.live,
+            "had_image": bool(image),
         }
 
     def _ask_deepseek(
@@ -159,23 +207,26 @@ class MikuAgent:
         system_prompt: str,
         history: list[dict],
         user_message: str,
+        image: Optional[bytes] = None,
     ) -> tuple[str, str]:
-        """调用 DeepSeek chat API，支持 write_memory 工具调用。"""
+        """调用 DeepSeek chat API，支持 write_memory 工具调用与图片输入。"""
         messages: list[dict] = [{"role": "system", "content": system_prompt}]
         for msg in history:
             messages.append({"role": msg["role"], "content": msg["content"]})
-        messages.append({"role": "user", "content": user_message})
+        messages.append(
+            {"role": "user", "content": self._user_content(user_message, image)}
+        )
 
         response = self.client.chat.completions.create(
-            model=self.model,
             messages=messages,
-            temperature=self.temperature,
             tools=[WRITE_MEMORY_TOOL],
             tool_choice="auto",
+            **self._base_kwargs(),
         )
         message = response.choices[0].message
 
         if message.tool_calls:
+            # 工具轮：第 1 轮通常 content 为空、只返回 tool_calls，属正常行为
             messages.append(message.model_dump(exclude_none=True))
             for call in message.tool_calls:
                 try:
@@ -193,9 +244,7 @@ class MikuAgent:
                     {"role": "tool", "tool_call_id": call.id, "content": note}
                 )
             response = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=self.temperature,
+                messages=messages, **self._base_kwargs()
             )
             message = response.choices[0].message
 
