@@ -183,7 +183,19 @@ TTS_PROMPT_TEXT=这里填上一步转出来的文本
 TTS_USE_BERT=true          # 中文效果更好；显存吃紧设 false
 ```
 
-**实机数据**：开 BERT 显存约 **2.2GB**、关掉约 1.7GB；**RTF ≈ 0.78**（9.8 秒音频耗时 7.7 秒）。
+**实机数据**（RTX 3050 Ti Laptop 4GB）：
+
+| 项目 | 数值 |
+| --- | --- |
+| 显存 | 开 BERT 约 **2.2GB**，关掉约 1.7GB |
+| 启动到可发声 | 约 **35 秒**（torch 导入 12s + 模型加载 6s + 预热 12s） |
+| 稳态合成速度 | **RTF 0.17 ~ 0.37**（比实时快 3~6 倍） |
+| 首字延迟 | 约 **1.5 秒**（逐句流水线，见下） |
+
+> **关于「推理慢」**：GSV 用静态 CUDA graph 缓存，**每种句长的第一次推理都要现捕获计算图** ——
+> 实测同长度第 1 次 9.6 秒、第 3 次 1.9 秒。所以启动时会按短/中/长各跑两遍预热
+> （`TTS_WARMUP=true`，只多花 12 秒），之后全程都是稳态速度。
+> 若关掉预热，前几条回复会慢 3~6 倍。
 
 > **两处踩过的坑，已内置处理：**
 > - 4GB 显存要和桌宠共享，必须给 PyTorch 设 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`，
@@ -195,6 +207,19 @@ TTS_USE_BERT=true          # 中文效果更好；显存吃紧设 false
 
 > ⚠️ **版权**：初音未来的音色归 Crypton Future Media 所有。参考音频与克隆出的音色
 > 请仅用于本机个人学习，**不要分发**（`assets/voice/` 已在 `.gitignore` 中）。
+
+### 逐句流水线
+
+GPT-SoVITS 是「整段合成完才出声」。回复会被按句切开，**第一句合成完就先播**，
+后台同时合成下一句 —— 首字延迟从「整段合成时间」降到「第一句合成时间」。
+实测一条 94 字回复切成 3 段（8.83 / 8.32 / 3.98 秒），首段 1.52 秒就出声。
+
+### 情感 → 语速
+
+`agent` 解析出的情感标签会映射成 GSV 的 `speed` 参数，
+让不同情绪的语速有区别（`MOTIVATED` 1.12 / `HAPPY` 1.08 / `NORMAL` 1.0 / `SAD` 0.92）。
+
+> 注意：单次合成的时长本身有约 30% 的采样波动，所以听感差异没有参数差距那么显著。
 
 ### 口型同步
 
@@ -243,6 +268,12 @@ EMOTION_EXPRESSION = {"HAPPY": "Saihong", "SURPRISED": "Chijing", ...}
 - **`import PySide6.QtCore` 报 `ERROR_PROC_NOT_FOUND`**：装到了 PySide6 6.11。该版本的 wheel 缺 ICU DLL，请按 `requirements.txt` 约束装回 6.8.x。
 - **回复是「演示模式」**：`.env` 中未配置或未正确配置 `DEEPSEEK_API_KEY`，或 `MOCK_MODE=true`。
 - **没有声音**：检查系统默认播放设备；在设置里确认「语音输出」已开启。首次使用 `edge` 引擎需要联网。
+- **`sovits` 启动很慢 / 前几句特别慢**：正常。torch 导入约 12 秒、模型加载约 6 秒、
+  预热约 12 秒，合计约 35 秒后才可发声；预热完就一直是稳态速度。
+  嫌启动慢可设 `TTS_WARMUP=false`，代价是每种句长的头几次合成会慢 3~6 倍。
+- **切 `TTS_DEVICE=cpu` 报 `No viable backend for scaled_dot_product_attention`**：
+  `gsv_tts` 的注意力后端是按 `torch.cuda.is_available()` 选的，**有显卡的机器**
+  即使用 `device=cpu` 也会选到 CUDA 专用后端，因而失败。没有显卡时请改用 `TTS_ENGINE=edge`。
 - **语音输入没反应 / 转写失败**：首次使用需联网下载 Whisper 模型（默认 `small` 约 460MB）；确认麦克风可用且未被占用；可调整 `.env` 中 `STT_MODEL`（`base` 更轻）与 `STT_LANGUAGE`。
 - **模型下载慢 / 下载失败**：国内网络默认走 `hf-mirror.com` 镜像；可在 `.env` 中设置 `STT_HF_ENDPOINT`（留空 = 官方源）。
 - **想改窗口大小**：调 `.env` 里的 `WINDOW_WIDTH` / `WINDOW_HEIGHT`，模型会自动重新适配。

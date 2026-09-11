@@ -68,6 +68,13 @@ def build_engine():
     """在主线程里加载引擎（这一步在干净进程中是可靠的）。"""
     from gsv_tts import TTS as GSVTTS
 
+    if config.TTS_DEVICE == "cpu":
+        log("提示：TTS_DEVICE=cpu 在本机可能不可用 ——")
+        log("  gsv_tts 的 choose_attention_backend() 是按 torch.cuda.is_available() 决策的，")
+        log("  有显卡的机器即使强制 device=cpu 也会选到 CUDA 专用的 CUDNN_ATTENTION，")
+        log("  随后在 CPU 张量上抛 'No viable backend for scaled_dot_product_attention'。")
+        log("  无显卡建议改用 TTS_ENGINE=edge（在线、无需 GPU）。")
+
     models_dir = Path(config.TTS_MODELS_DIR)
     models_dir.mkdir(parents=True, exist_ok=True)
 
