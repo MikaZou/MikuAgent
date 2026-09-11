@@ -85,7 +85,16 @@ def main() -> int:
     QTimer.singleShot(1200, lambda: win.send_message(message))
     QTimer.singleShot(int(min(6.0, hold * 0.4) * 1000), lambda: shot("mid"))
     QTimer.singleShot(int((hold - 1.0) * 1000), lambda: shot("final"))
-    QTimer.singleShot(int(hold * 1000), app.quit)
+    def _finish() -> None:
+        # 必须走 close()，让它触发 closeEvent → tts.shutdown()。
+        # 直接 app.quit() 会绕过清理，留下孤立的合成服务进程占着显存。
+        try:
+            win.close()
+        except Exception:  # noqa: BLE001
+            pass
+        app.quit()
+
+    QTimer.singleShot(int(hold * 1000), _finish)
 
     app.exec()
 
