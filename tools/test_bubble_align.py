@@ -72,11 +72,12 @@ def main() -> int:
               f"BUBBLE_TOP={pw.BUBBLE_TOP} BUBBLE_MAX_H={pw.BUBBLE_MAX_H} | "
               f"模型顶部={model_top}")
         print(f"{'消息':6s} {'气泡高':>6s} {'气泡y':>6s} {'下沿':>6s} "
-              f"{'距模型':>7s} {'距窗口顶':>8s}")
-        print("-" * 48)
+              f"{'距模型':>7s} {'按钮y':>6s} {'按钮距气泡':>10s}")
+        print("-" * 62)
 
         bottoms: list[int] = []
         gaps: list[int] = []
+        btn_gaps: list[int] = []
         for name, text in [
             ("短", SHORT),
             ("中", MEDIUM),
@@ -88,22 +89,37 @@ def main() -> int:
             b = window.bubble
             bottom = b.y() + b.height()
             gap = (model_top or 0) - bottom
+            btn_y = window.btn_min.y()
+            btn_gap = b.y() - (btn_y + pw.BUTTON_SIZE)
             bottoms.append(bottom)
             gaps.append(gap)
+            btn_gaps.append(btn_gap)
             print(f"{name:6s} {b.height():6d} {b.y():6d} {bottom:6d} "
-                  f"{gap:7d} {b.y():8d}")
+                  f"{gap:7d} {btn_y:6d} {btn_gap:10d}")
 
         span_bottom = max(bottoms) - min(bottoms)
         span_gap = max(gaps) - min(gaps)
+        span_btn = max(btn_gaps) - min(btn_gaps)
         print()
         print(f"气泡下沿波动  : {span_bottom}px（应为 0）")
         print(f"距模型间距波动: {span_gap}px（应为 0）")
+        # 气泡到顶端(max height)时按钮只能贴到 BUTTON_MARGIN，那时间距会更大，
+        # 所以只要求「不为负（不重叠）」且「短消息时按钮跟着下移」
+        print(f"按钮与气泡间距: {min(btn_gaps)}~{max(btn_gaps)}px")
         if span_bottom:
             failures.append(f"气泡下沿随消息长度漂移 {span_bottom}px，没有对齐")
         if span_gap:
             failures.append(f"气泡与模型间距漂移 {span_gap}px，没有对齐")
         if min(gaps) < 0:
             failures.append(f"气泡压到了模型上（最小间距 {min(gaps)}px）")
+        if min(btn_gaps) < 0:
+            failures.append(f"角标按钮压到了气泡上（间距 {min(btn_gaps)}px）")
+        # 气泡上移时按钮必须跟着上移，否则又变成「钉死在顶端」
+        if not (btn_gaps[0] > btn_gaps[-1]):
+            failures.append(
+                f"短消息({btn_gaps[0]}px)到超长消息({btn_gaps[-1]}px)按钮没有跟着气泡移动"
+                "——按钮被钉死在窗口顶端了"
+            )
 
         window.bubble.show_message(LONG * 2, "HAPPY", typewriter=False)
         settle()

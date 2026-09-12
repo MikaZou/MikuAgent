@@ -213,14 +213,17 @@ class PetWindow(Live2DView):
             QTimer.singleShot(250, self._measure_model_top)
 
     def _button_row_y(self) -> int:
-        """角标按钮的纵向位置。
+        """角标按钮的纵向位置 —— 始终贴住它下面那个东西的上沿。
 
-        - 有气泡时：待在窗口顶端（气泡从 BUBBLE_TOP 开始，正好让开）
+        - 有气泡时：贴气泡上沿。气泡是**底部对齐**的，短消息时会上移，
+          按钮必须跟着上移，否则会和气泡之间空出一大截（看起来像被钉死了）
         - 没气泡时：下移贴到初音头顶上方，避免顶部留一大片空白
         模型顶部是运行时实测的（Live2DView.measure_model_top），不是写死的常数。
+
+        注意：必须在气泡摆好位置之后调用，否则拿到的是上一轮的 bubble.y()。
         """
         if self.bubble.isVisible():
-            return BUTTON_MARGIN
+            return max(BUTTON_MARGIN, self.bubble.y() - BUTTON_SIZE - 8)
         if self._model_top is None:
             return BUTTON_MARGIN
         return max(BUTTON_MARGIN, self._model_top - BUTTON_SIZE - 10)
@@ -236,10 +239,6 @@ class PetWindow(Live2DView):
 
     def _layout_children_inner(self) -> None:
         w, h = self.width(), self.height()
-        btn_y = self._button_row_y()
-        self.btn_min.move(BUTTON_MARGIN, btn_y)
-        self.btn_close.move(BUTTON_MARGIN + BUTTON_SIZE + 6, btn_y)
-        self.btn_settings.move(w - BUTTON_MARGIN - BUTTON_SIZE, btn_y)
 
         # 气泡：始终占满可用宽度（而不是随文字长短忽宽忽窄），
         # 这样短句也够大、长句换行整齐，不会再被头发挤成一小块。
@@ -257,6 +256,13 @@ class PetWindow(Live2DView):
         bubble_bottom = BUBBLE_TOP + BUBBLE_MAX_H
         bubble_y = max(BUBBLE_TOP, bubble_bottom - self.bubble.height())
         self.bubble.move(max(0, (w - bubble_w) // 2), bubble_y)
+
+        # 角标按钮：必须**在气泡摆好之后**再定位，因为它要贴的是气泡上沿
+        # （气泡底部对齐，短消息时会上移，按钮得跟着走）
+        btn_y = self._button_row_y()
+        self.btn_min.move(BUTTON_MARGIN, btn_y)
+        self.btn_close.move(BUTTON_MARGIN + BUTTON_SIZE + 6, btn_y)
+        self.btn_settings.move(w - BUTTON_MARGIN - BUTTON_SIZE, btn_y)
 
         self.input_bar.setGeometry(12, h - bar_h - 12, w - 24, bar_h)
 

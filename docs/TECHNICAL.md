@@ -1555,6 +1555,30 @@ self.bubble.move(x, bubble_y)
 > 这是底部对齐的必然结果（等价于最后一行位置固定、旧行往上走）。
 > 换成顶部对齐就没有这个位移，但会退回"短消息下方一大片空白"。
 
+**连带修的：角标按钮也得跟着气泡走。**
+气泡底部对齐后会上移，而 `_button_row_y()` 原本写的是「有气泡就回窗口顶端」，
+于是短消息时气泡飘到 y≈100、按钮还钉在 y=10，中间空出一大截
+（看起来就像按钮"失去动态效果"了）。改成贴气泡上沿：
+
+```python
+if self.bubble.isVisible():
+    return max(BUTTON_MARGIN, self.bubble.y() - BUTTON_SIZE - 8)
+```
+
+**顺序问题**：`_layout_children_inner()` 原先先算按钮位置、后摆气泡，
+那样读到的是上一轮的 `bubble.y()`。必须把按钮定位挪到气泡定位**之后**。
+
+实测（`tools/test_bubble_align.py`）：
+
+| 消息 | 气泡 y | 按钮 y | 按钮距气泡 |
+| --- | --- | --- | --- |
+| 短 | 162 | 124 | 8 |
+| 中 | 144 | 106 | 8 |
+| 长 | 46 | 10 | 6（受 BUTTON_MARGIN 下限约束） |
+
+测试里加了断言：按钮不得压到气泡上，且短消息与超长消息之间按钮 y 必须不同
+（否则就是又被钉死在顶端了）。
+
 #### 五个必须处理的细节
 
 **1. QLabel 默认垂直居中，必须显式顶对齐。**
@@ -1658,7 +1682,7 @@ python tools/test_bubble_scroll.py
 | `tools/test_reconfigure_ui.py` | 「修改配置」按钮信号 + 远程服务运行中启停/换端口 |
 | `tools/test_reconfigure_e2e.py` | 真实 PetWindow 跑完整重配链路（快照并还原 .env） |
 | `tools/test_bubble_scroll.py` | 气泡长文本滚动 + `parse_emotion` 标签清理 + 自动隐藏取消 |
-| `tools/test_bubble_align.py` | 气泡下沿与模型始终对齐（真实 PetWindow，断言下沿/间距零漂移） |
+| `tools/test_bubble_align.py` | 气泡下沿与模型始终对齐 + 角标按钮跟随气泡（真实 PetWindow） |
 
 ### 6.2 本会话踩过的坑（按代价排序）
 
