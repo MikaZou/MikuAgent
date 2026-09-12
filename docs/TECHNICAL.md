@@ -1488,21 +1488,36 @@ python tools/test_reconfigure_e2e.py  # 真实 PetWindow 跑完整链路（会�
 
 ### 5.8 气泡长文本可滚动（**已完成**）
 
-气泡高度上限是 `BUBBLE_MAX_H = 132`（`ui/pet_window.py`），这个值同时决定
-模型避让的安全区（`BUBBLE_TOP + BUBBLE_MAX_H`），不能随便加大。
-但长回复超过 132px 之前是**直接被裁掉**的 —— 末尾几个字永远看不到。
+#### 气泡高度与取景是配套的
 
-改法：把内容 `QLabel` 放进 `QScrollArea`，超出部分可以上下滑动查看。
+气泡高度上限 `BUBBLE_MAX_H` 直接决定模型避让的安全区
+（`BUBBLE_TOP + BUBBLE_MAX_H`），**不能单独加大**。所以窗口高度也一并调了：
+
+| 窗口高 | 气泡上限 | 模型 scale / dy | 模型 top / bottom | 安全区 |
+| --- | --- | --- | --- | --- |
+| 600（旧） | 132 | 0.80 / 0.15 | 191 / 507 | [184, 524] |
+| 660（现） | 188 | 0.80 / 0.00 | 248 / 564 | [240, 584] |
+
+关键点：**模型尺寸完全没变**（都是 128×316），只是整体下移 57px，
+用窗口多出来的高度换气泡空间。所以「气泡变高」并没有让 Miku 变小。
+
+`ui/pet_window.py` 里用一张按窗口高度索引的表 `_LAYOUT_BY_HEIGHT` 选档，
+而不是写死单一数值 —— 否则一旦 `WINDOW_HEIGHT` 被改小（本地 `.env` 里就有
+这一项），188px 的气泡会直接压到模型头上。没量过的尺寸取「不超过它的最大
+已量档」，宁可气泡小一点也不突破安全区。改窗口尺寸必须用
+`tools/measure_framing.py` 重新量。
+
+#### 结构
 
 ```
-气泡（≤132px）
+气泡（≤ BUBBLE_MAX_H）
  └ QVBoxLayout
     ├ 情绪 chip
     └ QScrollArea（滚动条按需出现）
        └ QLabel（wordWrap，顶对齐）
 ```
 
-#### 三个必须处理的细节
+#### 五个必须处理的细节
 
 **1. QLabel 默认垂直居中，必须显式顶对齐。**
 滚动区会把 QLabel 拉得比内容高，居中的结果是整段文字被顶到可视区下半部分、
@@ -1528,6 +1543,29 @@ height = max(rect.height(), fm.height()) + fm.lineSpacing() // 3
 
 > 用 `QAbstractSlider.actionTriggered` 区分也可以，但它触发时 value 还没更新，
 > 判断时机不对；用 `_auto_scrolling` 标志位更稳。
+
+**4. 引入 QScrollArea 之后 `adjustSize()` 失效了 —— 必须自己算高度。**
+这是最隐蔽的一个。原先气泡靠 `adjustSize()` 按 QLabel 的 sizeHint 长高，
+放进滚动区后，滚动区的 sizeHint **不随内容增长**，于是气泡只会缩到最小、
+下面留一大片空白，然后全靠滚动。
+
+实测数值：窗口 660、上限 188，但气泡只有 **94px**，
+下方空白 **107px**。改成显式计算：
+
+```python
+want = min(self._chrome_height() + needed + self._pad(), self._max_height)
+self.setFixedHeight(want)
+```
+
+修完后气泡 188px，与模型之间只剩 13px 安全间距。
+`tools/test_bubble_scroll.py` 里加了这条的回归断言
+（超长文本的气泡高度必须 ≥ 上限 − 4px）。
+
+**5. 防裁切余量只能加在气泡高度上，不能加进内容高度。**
+一开始把 `+ lineSpacing()//3` 的余量算进了正文高度，结果正文比可视区高
+那么几像素 —— 连「你好」这种短句都会冒出一条多余的滚动条（实测滚动范围 2px）。
+现在 `measure_content_height()` 返回**精确**值，余量只在 `apply_content_height()`
+里加到气泡总高度上。
 
 #### 顺带修掉：开场白定时器吞掉回复
 

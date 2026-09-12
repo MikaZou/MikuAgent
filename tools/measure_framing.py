@@ -31,7 +31,7 @@ H = int(sys.argv[2]) if len(sys.argv) > 2 else 580
 
 # 垂直分区（与 ui/pet_window.py 保持一致）
 BUBBLE_TOP = 46
-BUBBLE_MAX_H = 132
+BUBBLE_MAX_H = 188
 SAFE_TOP = BUBBLE_TOP + BUBBLE_MAX_H + 6
 SAFE_BOTTOM = H - 76     # 输入栏顶边
 

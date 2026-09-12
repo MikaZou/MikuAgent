@@ -108,10 +108,11 @@ WINDOW_STATE_FILE = DATA_DIR / "window.json"
 
 # 窗口尺寸（透明无边框）
 WINDOW_WIDTH = int(os.getenv("WINDOW_WIDTH", "360"))
-# 高度不能随便减：顶部按钮(40) + 气泡(最多132) + 底部输入栏(70) 是固定开销，
-# 减到 560 以下时模型会被迫骤降一档。360x600 是实测的平衡点，
-# 改尺寸请用 tools/measure_framing.py 重新量取景。
-WINDOW_HEIGHT = int(os.getenv("WINDOW_HEIGHT", "600"))
+# 高度不能随便减：顶部按钮(40) + 气泡(最多188) + 底部输入栏(70) 是固定开销。
+# 660 是在「不缩小模型」的前提下给气泡让出高度的结果：同为 scale 0.80 时，
+# 600 高只能容下 132px 气泡，660 高可以容到 188px，而模型尺寸不变
+# （都是 128x316，只是整体下移）。改尺寸请用 tools/measure_framing.py 重新量。
+WINDOW_HEIGHT = int(os.getenv("WINDOW_HEIGHT", "660"))
 WINDOW_FPS = int(os.getenv("WINDOW_FPS", "60"))
 
 # ===== 语音输出（TTS） =====

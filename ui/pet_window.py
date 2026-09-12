@@ -28,18 +28,45 @@ from ui.tray import Tray
 # 模型取景。实测：Resize 后模型底部贴着窗口底边，dy 为正会把模型上移
 # （0.15 ≈ 33 逻辑像素）。
 #
-# 这里的数值是用 tools/measure_framing.py 在 360x600 下量出来的，
-# 目的是让模型的包围盒完整落在「气泡下沿(184) ~ 输入栏上沿(524)」之间：
-#   scale 0.80 / dy 0.15  ->  top 191, bottom 507  （上下各留 7 / 17px）
-# 窗口高度不能再减：按钮(40)+气泡(132)+输入栏(70) 是固定开销，
-# 降到 560 时只有 scale 0.70 能避开，模型会骤降一档。
-FRAMING_SCALE = 0.80
-FRAMING_OFFSET = (0.0, 0.15)
+# 取景（模型位置/大小）和气泡最大高度是**配套**的：气泡越高，模型要让得越多。
+# 下面这张表是用 tools/measure_framing.py 在 360 宽下逐档量出来的实测值，
+# 目的是让模型包围盒完整落在「气泡下沿 ~ 输入栏上沿」之间：
+#
+#   窗口高 600：气泡 132 / scale 0.80 / dy 0.15 -> 模型 top 191 bottom 507
+#              安全区 [184, 524]，上下各留 7 / 17px
+#   窗口高 660：气泡 188 / scale 0.80 / dy 0.00 -> 模型 top 248 bottom 564
+#              安全区 [240, 584]，上下各留 8 / 20px
+#              （模型尺寸和 600 时完全一样，128x316，只是整体下移，
+#                用窗口多出来的高度换气泡空间）
+#
+# 写死单一数值的话，一旦 WINDOW_HEIGHT 被改小，气泡就会压到模型头上 ——
+# 所以按窗口高度查表。
+_LAYOUT_BY_HEIGHT = {
+    # 窗口高: (气泡最大高, 模型 scale, 模型 dy)
+    600: (132, 0.80, 0.15),
+    660: (188, 0.80, 0.00),
+}
+
+
+def _layout_for(height: int) -> tuple[int, float, tuple[float, float]]:
+    """按窗口高度选一套量过的布局。
+
+    没量过的尺寸取「不超过它的最大已量档」：宁可气泡小一点，
+    也不要突破安全区把模型盖住。
+    """
+    if height in _LAYOUT_BY_HEIGHT:
+        return _LAYOUT_BY_HEIGHT[height]
+    smaller = [h for h in _LAYOUT_BY_HEIGHT if h <= height]
+    key = max(smaller) if smaller else min(_LAYOUT_BY_HEIGHT)
+    bubble_h, scale, dy = _LAYOUT_BY_HEIGHT[key]
+    return bubble_h, scale, (0.0, dy)
+
+
+BUBBLE_MAX_H, FRAMING_SCALE, FRAMING_OFFSET = _layout_for(config.WINDOW_HEIGHT)
 
 # 布局尺寸（改这里要同步 tools/measure_framing.py 里的同名常量）
 BUBBLE_MARGIN = 16      # 气泡左右留白
 BUBBLE_TOP = 46         # 气泡距窗口顶部：必须让开上面那排角标按钮
-BUBBLE_MAX_H = 132      # 气泡最大高度；模型按这个上沿来避让
 BUTTON_MARGIN = 10      # 角标按钮距窗口边缘
 BUTTON_SIZE = 30        # 角标按钮边长（与 _corner_button 里的 setFixedSize 一致）
 
@@ -205,8 +232,9 @@ class PetWindow(Live2DView):
         bar_h = 58
         bubble_w = max(160, w - BUBBLE_MARGIN * 2)
         self.bubble.setFixedWidth(bubble_w)
-        self.bubble.setMaximumHeight(BUBBLE_MAX_H)
-        self.bubble.adjustSize()
+        # 高度由气泡自己按内容算（上限 BUBBLE_MAX_H）——
+        # 引入 QScrollArea 后 adjustSize() 不再随内容增长，必须显式驱动。
+        self.bubble.set_max_height(BUBBLE_MAX_H)
         self.bubble.move(max(0, (w - self.bubble.width()) // 2), BUBBLE_TOP)
 
         self.input_bar.setGeometry(12, h - bar_h - 12, w - 24, bar_h)

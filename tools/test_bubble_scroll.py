@@ -27,7 +27,7 @@ SAMPLE = (
     "灵感 烦恼 还是单纯想瞎聊都可以哦☆"
 )
 
-BUBBLE_MAX_H = 132
+BUBBLE_MAX_H = 188   # 必须与 ui/pet_window.py 的同名常量（660 高窗口档位）一致
 
 
 def check_emotion() -> None:
@@ -63,7 +63,8 @@ def check_emotion() -> None:
         failures.append(f"截图那条情感应为 HAPPY，实际 {emo}")
 
 
-def render(name: str, text: str, width: int = 320) -> None:
+def render(name: str, text: str, width: int = 320) -> tuple[bool, int]:
+    """渲染一条消息，返回 (是否需要滚动, 气泡高度)。"""
     from PySide6.QtWidgets import QApplication
 
     from ui.bubble import SpeechBubble
@@ -71,22 +72,23 @@ def render(name: str, text: str, width: int = 320) -> None:
     app = QApplication.instance() or QApplication(sys.argv)
     bubble = SpeechBubble(None)
     bubble.setFixedWidth(width)
-    bubble.setMaximumHeight(BUBBLE_MAX_H)
+    bubble.set_max_height(BUBBLE_MAX_H)
     bubble.show_message(text, "HAPPY", typewriter=False)
-    bubble.resize(width, min(bubble.sizeHint().height(), BUBBLE_MAX_H))
-    app.processEvents()
-    bubble._sync_content_height()
-    app.processEvents()
+    # 布局要跑几轮才稳定
+    for _ in range(6):
+        app.processEvents()
+        bubble.apply_content_height()
 
     bar = bubble._bar
     scrollable = bar.maximum() > 0
-    print(f"  {name}: 气泡高 {bubble.height()}px | "
-          f"内容需 {bubble._content.minimumHeight()}px | "
+    chrome = bubble._chrome_height()
+    print(f"  {name}: 气泡高 {bubble.height()}px（上限 {BUBBLE_MAX_H}）| "
+          f"正文 {bubble._content.minimumHeight()}px | chrome {chrome}px | "
           f"滚动范围 0~{bar.maximum()} -> {'可滚动' if scrollable else '不需要滚动'}")
     out = ROOT / ".tmp" / f"bubble_{name}.png"
     bubble.grab().save(str(out))
     print(f"      已保存 {out}")
-    return scrollable
+    return scrollable, bubble.height()
 
 
 def check_render() -> None:
@@ -94,13 +96,22 @@ def check_render() -> None:
     print("=" * 68)
     print("测试 2：长文本可滚动 / 短文本不出现滚动条")
     print("=" * 68)
-    long_ok = render("long", SAMPLE)
-    short_ok = render("short", "好哦～主人早上好呀♪")
+    long_ok, long_h = render("long", SAMPLE)
+    short_ok, short_h = render("short", "好哦～主人早上好呀♪")
+    # 长到一定程度的文本应当把气泡撑满上限，否则下方会留一大片空白
+    _, very_h = render("verylong", SAMPLE * 2)
 
     if not long_ok:
         failures.append("长文本没有产生可滚动区域（应该能上下滑动看全文）")
     if short_ok:
         failures.append("短文本竟然出现了滚动条，气泡不该有多余滚动")
+    if short_h >= long_h:
+        failures.append(f"短文本气泡({short_h}px)不该不低于长文本({long_h}px)")
+    if very_h < BUBBLE_MAX_H - 4:
+        failures.append(
+            f"超长文本的气泡只有 {very_h}px，没撑到上限 {BUBBLE_MAX_H}px —— "
+            "下方会留一大片空白（QScrollArea 让 adjustSize 失效的回归点）"
+        )
 
 
 def check_autohide_cancel() -> None:

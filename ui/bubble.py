@@ -147,37 +147,74 @@ class SpeechBubble(QFrame):
         # 自动跟随到底部；用户一旦自己往上滚，就停在他看的位置不要拽回来
         self._follow = True
         self._auto_scrolling = False
+        # 气泡高度上限，由 PetWindow 通过 set_max_height 告知（0 = 不限）
+        self._max_height = 0
         self._scroll.verticalScrollBar().valueChanged.connect(self._on_scrolled)
 
         self.hide()
 
-    # ------------------------------------------------------------- 滚动
+    # ------------------------------------------------------------- 滚动 / 高度
     @property
     def _bar(self):
         return self._scroll.verticalScrollBar()
 
-    def _sync_content_height(self) -> None:
-        """按当前 viewport 宽度精确算出内容需要多高。
+    def content_width(self) -> int:
+        """内容可用宽度（扣掉左右内边距）。"""
+        m = self.layout().contentsMargins()
+        return max(1, self.width() - m.left() - m.right())
+
+    def measure_content_height(self) -> int:
+        """文本在当前宽度下需要多高。
 
         不用 QLabel.heightForWidth()：实测它会明显**高估**（320px 宽、
         实际 4 行的文本算成 216px，真实只要约 84px），结果是往下滚
         能看到一大片空白。改用 QFontMetrics.boundingRect 按实际宽度
         和换行规则算，和 QLabel 的渲染口径一致。
+
+        注意这里返回的是**精确**高度，不要加余量 —— 余量会让内容比
+        可视区高一点点，短文本也会冒出一条多余的滚动条。防裁切的余量
+        加在气泡总高度上（见 apply_content_height）。
         """
-        width = self._scroll.viewport().width()
         text = self._content.text()
-        if width <= 0 or not text:
-            return
+        if not text:
+            return 0
         fm = self._content.fontMetrics()
         rect = fm.boundingRect(
-            QRect(0, 0, width, 100000),
+            QRect(0, 0, self.content_width(), 100000),
             int(Qt.TextFlag.TextWordWrap),
             text,
         )
-        # 留一点点余量，避免最后一行被裁掉（宁可多几像素空白）
-        height = max(rect.height(), fm.height()) + fm.lineSpacing() // 3
-        if height != self._content.minimumHeight():
-            self._content.setMinimumHeight(height)
+        return max(rect.height(), fm.height())
+
+    def _chrome_height(self) -> int:
+        """气泡里除正文之外的固定开销：内边距 + 情绪 chip + 间距 + 小三角。"""
+        m = self.layout().contentsMargins()
+        chip = self._chip.sizeHint().height() if self._chip.isVisible() else 0
+        return m.top() + m.bottom() + chip + self.layout().spacing()
+
+    def _pad(self) -> int:
+        """防最后一行被裁的余量，只算进气泡高度、不算进内容高度。"""
+        return max(2, self._content.fontMetrics().lineSpacing() // 4)
+
+    def set_max_height(self, height: int) -> None:
+        self._max_height = int(height)
+        self.apply_content_height()
+
+    def apply_content_height(self) -> None:
+        """按内容把气泡撑到合适高度（上限 _max_height）。
+
+        引入 QScrollArea 之后 ``adjustSize()`` 不再管用了：滚动区的 sizeHint
+        不随内容增长，气泡会缩到最小、下面留一大片空白然后全靠滚动。
+        所以高度必须自己算：min(内容 + chrome + 余量, 上限)。
+        """
+        needed = self.measure_content_height()
+        if needed and needed != self._content.minimumHeight():
+            self._content.setMinimumHeight(needed)
+        if self._max_height <= 0:
+            return
+        want = min(self._chrome_height() + needed + self._pad(), self._max_height)
+        if want > 0 and self.height() != want:
+            self.setFixedHeight(want)
 
     def _on_scrolled(self, value: int) -> None:
         """区分「用户滚动」和「我们自动跟随」。"""
@@ -191,11 +228,11 @@ class SpeechBubble(QFrame):
         self._auto_scrolling = False
 
     def _after_content_change(self) -> None:
-        """内容变了：重算高度，需要的话跟到底部。
+        """内容变了：重算气泡高度，需要的话跟到底部。
 
-        高度要等布局跑完才算得准，所以延到下一轮事件循环。
+        要等布局跑完才算得准，所以延到下一轮事件循环。
         """
-        QTimer.singleShot(0, self._sync_content_height)
+        QTimer.singleShot(0, self.apply_content_height)
         if self._follow:
             QTimer.singleShot(0, self._scroll_to_bottom)
 
@@ -205,7 +242,13 @@ class SpeechBubble(QFrame):
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
-        self._sync_content_height()
+        # 宽度变了要重排文本，但不能再改高度（否则和 apply_content_height 打架）
+        QTimer.singleShot(0, self._reflow_content)
+
+    def _reflow_content(self) -> None:
+        needed = self.measure_content_height()
+        if needed and needed != self._content.minimumHeight():
+            self._content.setMinimumHeight(needed)
 
     # ------------------------------------------------------------- 绘制小三角
     def showEvent(self, event) -> None:  # noqa: N802
@@ -243,7 +286,6 @@ class SpeechBubble(QFrame):
         self._content.setObjectName("typingDots")
         self._content.setText("● ● ●")
         self._full_text = ""
-        self.adjustSize()
         self.scroll_to_top()
         self._follow = True
         self._after_content_change()
@@ -274,7 +316,7 @@ class SpeechBubble(QFrame):
 
         if typewriter and self._full_text:
             self._content.setText("")
-            self.adjustSize()
+            self.apply_content_height()
             self.show()
             self.raise_()
             self.scroll_to_top()
@@ -282,7 +324,7 @@ class SpeechBubble(QFrame):
             self._timer.start()
         else:
             self._content.setText(self._full_text)
-            self.adjustSize()
+            self.apply_content_height()
             self.show()
             self.raise_()
             self.scroll_to_top()
@@ -299,7 +341,7 @@ class SpeechBubble(QFrame):
         应该从第一句开始读 —— 停在底部会让用户以为「只有这几句」。
         用户中途自己滚过（_follow 已为 False）就不动他。
         """
-        self._sync_content_height()
+        self.apply_content_height()
         if self._follow and self._bar.maximum() > 0:
             self.scroll_to_top()
 
@@ -311,7 +353,6 @@ class SpeechBubble(QFrame):
             return
         self._shown += 1
         self._content.setText(self._full_text[: self._shown])
-        self.adjustSize()
         self._after_content_change()
 
     def hide_bubble(self) -> None:
