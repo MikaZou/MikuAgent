@@ -43,6 +43,16 @@ HAS_MINIMAX_KEY = bool(MINIMAX_API_KEY) and not MINIMAX_API_KEY.startswith("sk-x
 MAX_HISTORY_MESSAGES = int(os.getenv("MAX_HISTORY_MESSAGES", "20"))
 MOCK_MODE = _flag("MOCK_MODE")
 
+# ===== 远程服务（路线 A：手机作为瘦客户端连到本机） =====
+# 在 PC 端桌宠进程里额外起一个 HTTP + WebSocket 服务，
+# 手机浏览器访问 http://<PC的局域网IP>:<端口>/ 即可使用。
+# 关掉它不影响桌宠本身。
+REMOTE_ENABLED = _flag("REMOTE_ENABLED") if os.getenv("REMOTE_ENABLED") else True
+REMOTE_PORT = int(os.getenv("REMOTE_PORT", "8765"))
+# 手机端要加载的 JS 库来源（PIXI.js / pixi-live2d-display）。
+# 网络受限时换成可用镜像，例如 https://fastly.jsdelivr.net/npm
+REMOTE_CDN = os.getenv("REMOTE_CDN", "https://cdn.jsdelivr.net/npm").rstrip("/")
+
 # ===== 视觉（视频对话：让 Miku 看见主人） =====
 # 总开关；实际以设置面板的 QSettings 为准，这里只是默认值
 VISION_ENABLED = _flag("VISION_ENABLED")

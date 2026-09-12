@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0f172a">
+<title>MikuAgent · 手机端</title>
+<style>
+  :root {
+    --accent: #39c5bb;
+    --accent-dim: #2fb3a9;
+    --bg: #0b1220;
+    --panel: rgba(255,255,255,.94);
+    --text: #1f2430;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden;
+    background: var(--bg);
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    color: #e5e7eb;
+    overscroll-behavior: none;
+  }
+  #stage { position: fixed; inset: 0; }
+  #stage canvas { display: block; }
+
+  /* 顶部状态条 */
+  #topbar {
+    position: fixed; top: 0; left: 0; right: 0;
+    padding: calc(env(safe-area-inset-top) + 8px) 12px 8px;
+    display: flex; align-items: center; gap: 8px;
+    font-size: 12px; color: #94a3b8;
+    background: linear-gradient(180deg, rgba(11,18,32,.85), transparent);
+    pointer-events: none;
+  }
+  #dot { width: 8px; height: 8px; border-radius: 50%; background: #64748b; }
+  #dot.on { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+  #dot.err { background: #ef4444; }
+  #topbar .spacer { flex: 1; }
+
+  /* 气泡 */
+  #bubble {
+    position: fixed; left: 12px; right: 12px;
+    top: calc(env(safe-area-inset-top) + 44px);
+    max-height: 34vh; overflow-y: auto;
+    background: var(--panel); color: var(--text);
+    border-radius: 16px; padding: 12px 14px;
+    font-size: 15px; line-height: 1.65;
+    box-shadow: 0 8px 28px rgba(0,0,0,.35);
+    white-space: pre-wrap; word-break: break-word;
+    opacity: 0; transform: translateY(-8px);
+    transition: opacity .22s, transform .22s;
+    pointer-events: none;
+  }
+  #bubble.show { opacity: 1; transform: none; pointer-events: auto; }
+  #chip {
+    display: inline-block; font-size: 11px; padding: 1px 8px;
+    border-radius: 999px; margin-right: 6px;
+    background: rgba(57,197,187,.15); color: #0f766e; vertical-align: 2px;
+  }
+
+  /* 底部输入区 */
+  #bar {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    padding: 8px 10px calc(env(safe-area-inset-bottom) + 8px);
+    display: flex; align-items: center; gap: 8px;
+    background: linear-gradient(0deg, rgba(11,18,32,.92), rgba(11,18,32,.55) 70%, transparent);
+  }
+  #text {
+    flex: 1; min-width: 0;
+    border: 1px solid rgba(148,163,184,.35); border-radius: 12px;
+    background: rgba(255,255,255,.96); color: var(--text);
+    padding: 11px 13px; font-size: 15px; outline: none;
+  }
+  #text:focus { border-color: var(--accent); }
+  button {
+    border: none; border-radius: 12px; cursor: pointer;
+    font-size: 15px; padding: 11px 14px; font-weight: 600;
+    background: rgba(255,255,255,.14); color: #e5e7eb;
+    touch-action: manipulation;
+  }
+  button:active { transform: scale(.96); }
+  #send { background: var(--accent); color: #fff; }
+  #mic.rec { background: #ef4444; color: #fff; }
+  #cam.attached { background: var(--accent); color: #fff; }
+  #hint {
+    position: fixed; left: 0; right: 0; bottom: calc(env(safe-area-inset-bottom) + 76px);
+    text-align: center; font-size: 12px; color: #94a3b8; pointer-events: none;
+  }
+  #center {
+    position: fixed; inset: 0; display: flex; align-items: center;
+    justify-content: center; text-align: center; padding: 24px;
+    font-size: 14px; line-height: 1.8; color: #cbd5e1;
+  }
+  #center .box { max-width: 420px; }
+  #center code {
+    background: rgba(255,255,255,.1); padding: 2px 6px; border-radius: 6px;
+    font-size: 12px; word-break: break-all;
+  }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+
+<div id="topbar">
+  <span id="dot"></span>
+  <span id="status">连接中…</span>
+  <span class="spacer"></span>
+  <span id="engine"></span>
+</div>
+
+<div id="bubble"><span id="chip"></span><span id="btext"></span></div>
+
+<div id="center">
+  <div class="box" id="centerBox">正在加载 Live2D…</div>
+</div>
+
+<div id="hint"></div>
+
+<div id="bar">
+  <button id="cam" title="拍照发给 Miku">📷</button>
+  <input id="text" placeholder="和 Miku 说点什么…" autocomplete="off">
+  <button id="mic" title="按住说话">🎤</button>
+  <button id="send">发送</button>
+</div>
+
+<script src="__CDN__/pixi.js@6.5.10/dist/browser/pixi.min.js"></script>
+<script src="https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js"></script>
+<script src="__CDN__/pixi-live2d-display@0.4.0/dist/cubism4.min.js"></script>
+<script>
+"use strict";
+// 手机端：只做「渲染 + 采集 + 播放」，所有 AI 逻辑在 PC 上跑。
+// 见 docs/TECHNICAL.md 5.4.5 路线 A。
+
+const $ = (id) => document.getElementById(id);
+const statusEl = $("status"), dotEl = $("dot"), engineEl = $("engine");
+const bubble = $("bubble"), chip = $("chip"), btext = $("btext");
+const center = $("center"), centerBox = $("centerBox"), hint = $("hint");
+
+// 与 ui/live2d_view.py 保持一致（含「坏素材已弃用」的说明）
+const EMOTION_MOTION = {
+  HAPPY: "Tap", ANGRY: "Flick", SURPRISED: "FlickUp", SAD: "Cry",
+  MOTIVATED: "Tap", EMPATHY: "Idle", NORMAL: "Idle",
+};
+const EMOTION_EXPR = {
+  HAPPY: "Saihong", MOTIVATED: "Saihong", SURPRISED: "Chijing",
+  EMPATHY: "liuhan", SAD: "liuhan", ANGRY: null, NORMAL: null,
+};
+const EMOTION_CN = {
+  HAPPY: "开心", SAD: "难过", ANGRY: "生气", SURPRISED: "惊讶",
+  MOTIVATED: "元气", EMPATHY: "共情", NORMAL: "平静",
+};
+
+let model = null, app = null, ws = null, sessionId = null;
+let pendingImage = null;          // base64（不含 data: 前缀）
+let currentAudio = null;
+
+// ------------------------------------------------------------------ Live2D
+async function initLive2D() {
+  const w = window.innerWidth, h = window.innerHeight;
+  app = new PIXI.Application({
+    width: w, height: h,
+    backgroundAlpha: 0, antialias: true, resolution: Math.min(devicePixelRatio, 2),
+    autoDensity: true,
+  });
+  $("stage").appendChild(app.view);
+
+  model = await PIXI.live2d.Live2DModel.from("/model/miku.model3.json", {
+    autoInteract: false,
+  });
+  app.stage.addChild(model);
+
+  layout();
+  window.addEventListener("resize", layout);
+  center.style.display = "none";
+
+  // 点模型 → 播放随机动作（和 PC 端一致）
+  model.on("pointertap", () => {
+    const pool = ["Tap", "Tap", "Flick", "FlickUp", "Dance", "Idle"];
+    const g = pool[Math.floor(Math.random() * pool.length)];
+    try { model.motion(g); } catch (e) {}
+  });
+}
+
+function layout() {
+  if (!model) return;
+  const w = window.innerWidth, h = window.innerHeight;
+  app.renderer.resize(w, h);
+  // 模型原始约 1280x720，按高度适配并略微放大、底部对齐
+  const scale = Math.min(w / 1280, h / 720) * 1.5;
+  model.scale.set(scale);
+  model.x = w / 2;
+  model.y = h * 0.98;
+  model.anchor.set(0.5, 1);
+}
+
+function applyEmotion(emotion) {
+  if (!model) return;
+  const m = EMOTION_MOTION[emotion] || "Idle";
+  try { model.motion(m); } catch (e) {}
+  const e = EMOTION_EXPR[emotion];
+  if (e) { try { model.expression(e); } catch (err) {} }
+}
+
+// ---------------------------------------------------------------- 气泡/状态
+let bubbleTimer = null;
+function showBubble(text, emotion) {
+  chip.textContent = EMOTION_CN[emotion] || "";
+  chip.style.display = emotion && EMOTION_CN[emotion] ? "inline-block" : "none";
+  btext.textContent = text;
+  bubble.classList.add("show");
+  clearTimeout(bubbleTimer);
+  bubbleTimer = setTimeout(() => bubble.classList.remove("show"),
+                           Math.max(6000, text.length * 220));
+}
+
+function setStatus(text, cls) {
+  statusEl.textContent = text;
+  dotEl.className = cls || "";
+}
+
+function showHint(text) {
+  hint.textContent = text || "";
+  if (text) setTimeout(() => { if (hint.textContent === text) hint.textContent = ""; }, 3000);
+}
+
+// -------------------------------------------------------------- WebSocket
+function connect() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(`${proto}://${location.host}/ws`);
+
+  ws.onopen = () => setStatus("已连接", "on");
+  ws.onclose = () => {
+    setStatus("已断开，3 秒后重连…", "err");
+    setTimeout(connect, 3000);
+  };
+  ws.onerror = () => setStatus("连接出错", "err");
+  ws.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch (e) { return; }
+    handleMessage(msg);
+  };
+}
+
+function handleMessage(msg) {
+  switch (msg.type) {
+    case "ready": {
+      const p = msg.provider || {};
+      engineEl.textContent = `${p.llm || "?"} · TTS:${p.tts || "?"} · STT:${p.stt || "?"}`;
+      setStatus("已连接", "on");
+      break;
+    }
+    case "reply":
+      if (msg.session_id) sessionId = msg.session_id;
+      applyEmotion(msg.emotion);
+      showBubble(msg.text, msg.emotion);
+      break;
+    case "speech":
+      playSpeech(msg.data);
+      break;
+    case "transcript":
+      if (msg.text) { $("text").value = msg.text; showBubble(msg.text, "NORMAL"); }
+      break;
+    case "error":
+      setStatus("出错了", "err");
+      showBubble("呜…" + msg.message, "SAD");
+      break;
+    case "pong":
+      break;
+  }
+}
+
+function send(payload) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    showBubble("还没连上 PC 呢…", "SAD");
+    return false;
+  }
+  ws.send(JSON.stringify(payload));
+  return true;
+}
+
+// ------------------------------------------------------------------ 音频
+function playSpeech(b64) {
+  try {
+    const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    const blob = new Blob([bytes], { type: "audio/wav" });
+    if (currentAudio) { currentAudio.pause(); currentAudio = null; }
+    currentAudio = new Audio(URL.createObjectURL(blob));
+    currentAudio.play().catch((e) => showHint("浏览器拦截了自动播放，点一下屏幕"));
+  } catch (e) {
+    showHint("音频播放失败：" + e.message);
+  }
+}
+
+// -------------------------------------------------------- 文字 / 拍照 / 说话
+function doSend() {
+  const text = $("text").value.trim();
+  if (!text && !pendingImage) return;
+  const payload = { type: "chat", text: text || "（看看这张图）", session_id: sessionId };
+  if (pendingImage) { payload.image = pendingImage; clearPhoto(); }
+  if (send(payload)) { $("text").value = ""; bubble.classList.remove("show"); }
+}
+
+$("send").onclick = doSend;
+$("text").addEventListener("keydown", (e) => { if (e.key === "Enter") doSend(); });
+
+$("cam").onclick = async () => {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "user", width: 640, height: 480 },
+    });
+    const video = document.createElement("video");
+    video.srcObject = stream; video.muted = true; video.playsInline = true;
+    await video.play();
+    await new Promise((r) => setTimeout(r, 320));   // 等自动曝光稳定
+    const cv = document.createElement("canvas");
+    cv.width = video.videoWidth || 640; cv.height = video.videoHeight || 480;
+    cv.getContext("2d").drawImage(video, 0, 0);
+    stream.getTracks().forEach((t) => t.stop());
+    pendingImage = cv.toDataURL("image/jpeg", 0.8).split(",")[1];
+    $("cam").classList.add("attached");
+    showHint("已拍照，发送时会一起给 Miku 看");
+  } catch (e) {
+    showBubble("呜…拿不到摄像头权限：" + e.message, "SAD");
+  }
+};
+
+function clearPhoto() {
+  pendingImage = null;
+  $("cam").classList.remove("attached");
+}
+
+// 按住说话（用 MediaRecorder 采集，松开上传）
+let recorder = null, chunks = [], recTimer = null, recStart = 0;
+$("mic").addEventListener("pointerdown", async (e) => {
+  e.preventDefault();
+  if (recorder) return;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+    });
+    recorder = new MediaRecorder(stream);
+    chunks = [];
+    recorder.ondataavailable = (ev) => { if (ev.data.size) chunks.push(ev.data); };
+    recorder.onstop = async () => {
+      stream.getTracks().forEach((t) => t.stop());
+      const blob = new Blob(chunks, { type: recorder.mimeType });
+      recorder = null;
+      $("mic").classList.remove("rec");
+      clearInterval(recTimer);
+      if (blob.size < 1500) { showHint("录得太短啦"); return; }
+      setStatus("转写中…");
+      const b64 = await blobToWavBase64(blob);
+      send({ type: "audio", data: b64, session_id: sessionId });
+      setStatus("已连接", "on");
+    };
+    recorder.start();
+    recStart = Date.now();
+    $("mic").classList.add("rec");
+    recTimer = setInterval(() => {
+      showHint(`录音中… ${((Date.now() - recStart) / 1000).toFixed(1)}s（松开结束）`);
+    }, 100);
+  } catch (err) {
+    showBubble("呜…拿不到麦克风权限：" + err.message, "SAD");
+  }
+});
+["pointerup", "pointercancel", "pointerleave"].forEach((ev) => {
+  $("mic").addEventListener(ev, () => {
+    if (recorder && recorder.state !== "inactive") recorder.stop();
+  });
+});
+
+// MediaRecorder 出来的多是 webm/opus，这里解码成 16k 单声道 WAV 再上传，
+// 免去服务端装额外解码器
+async function blobToWavBase64(blob) {
+  const arr = await blob.arrayBuffer();
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const decoded = await ctx.decodeAudioData(arr);
+  const rate = 16000;
+  const off = new OfflineAudioContext(1, Math.ceil(decoded.duration * rate), rate);
+  const src = off.createBufferSource();
+  src.buffer = decoded;
+  src.connect(off.destination);
+  src.start();
+  const rendered = await off.startRendering();
+  await ctx.close();
+  const pcm = rendered.getChannelData(0);
+  return wavBase64(pcm, rate);
+}
+
+function wavBase64(samples, rate) {
+  const buf = new ArrayBuffer(44 + samples.length * 2);
+  const dv = new DataView(buf);
+  const w = (o, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i)); };
+  w(0, "RIFF"); dv.setUint32(4, 36 + samples.length * 2, true); w(8, "WAVE");
+  w(12, "fmt "); dv.setUint32(16, 16, true); dv.setUint16(20, 1, true);
+  dv.setUint16(22, 1, true); dv.setUint32(24, rate, true);
+  dv.setUint32(28, rate * 2, true); dv.setUint16(32, 2, true); dv.setUint16(34, 16, true);
+  w(36, "data"); dv.setUint32(40, samples.length * 2, true);
+  let o = 44;
+  for (let i = 0; i < samples.length; i++, o += 2) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    dv.setInt16(o, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  let bin = "";
+  const bytes = new Uint8Array(buf);
+  for (let i = 0; i < bytes.length; i += 8192) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
+  }
+  return btoa(bin);
+}
+
+// ------------------------------------------------------------------ 启动
+(async function main() {
+  if (!window.PIXI || !PIXI.live2d) {
+    centerBox.innerHTML =
+      "Live2D 渲染库没加载成功。<br><br>" +
+      "手机需要能访问 CDN（PIXI.js / pixi-live2d-display）。<br>" +
+      "若网络受限，可在 PC 的 <code>.env</code> 里把 <code>REMOTE_CDN</code> " +
+      "换成可用镜像后重启。";
+    return;
+  }
+  try {
+    await initLive2D();
+  } catch (e) {
+    centerBox.innerHTML = "模型加载失败：<br><code>" + e.message + "</code>";
+    return;
+  }
+  connect();
+})();
+</script>
+</body>
+</html>

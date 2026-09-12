@@ -95,7 +95,24 @@ def main() -> int:
     window = PetWindow(memory, agent, stt, tts)
     window.start()
 
+    # ---- 远程服务（路线 A：手机当瘦客户端连到这里）----
+    # 起不来只打日志，绝不影响桌宠本身
+    remote = None
+    try:
+        from remote_server import RemoteServer
+
+        remote = RemoteServer(agent, tts, stt, memory)
+        remote.start()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[Remote] 启动失败（不影响桌宠）：{exc}")
+
     code = app.exec()
+
+    if remote is not None:
+        try:
+            remote.stop()
+        except Exception:  # noqa: BLE001
+            pass
     live2d.dispose()
     return code
 
