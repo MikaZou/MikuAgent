@@ -23,6 +23,23 @@ DEEPSEEK_TEMPERATURE = float(os.getenv("DEEPSEEK_TEMPERATURE", "0.9"))
 # 且 max_tokens 偏小时可能只输出推理内容、正文为空。桌宠场景用 disabled。
 DEEPSEEK_THINKING = os.getenv("DEEPSEEK_THINKING", "disabled").strip().lower()
 
+# ===== MiniMax（云端 TTS / ASR，见 docs/TECHNICAL.md 5.5 节） =====
+# 走云端可以把本地 GPT-SoVITS 的重计算搬走：省约 1.4~2.2GB 显存 + 2.9GB 内存。
+MINIMAX_API_KEY = os.getenv("MINIMAX_API_KEY", "").strip()
+# 国内站 api.minimaxi.com；国际站 api.minimax.io
+MINIMAX_BASE_URL = os.getenv("MINIMAX_BASE_URL", "https://api.minimaxi.com").strip()
+# speech-2.8-hd（音质最好）/ speech-2.8-turbo（最快）；另有 2.6、02 系列
+MINIMAX_TTS_MODEL = os.getenv("MINIMAX_TTS_MODEL", "speech-2.8-hd").strip()
+# 音色克隆得到的 voice_id；空则回退到系统音色
+MINIMAX_VOICE_ID = os.getenv("MINIMAX_VOICE_ID", "").strip()
+MINIMAX_ASR_MODEL = os.getenv("MINIMAX_ASR_MODEL", "asr-1.0").strip()
+# 语速。克隆自 v4c 发布会致辞，那段本身语速偏慢：
+#   实测 speed=1.0 → 2.2 字/秒（明显偏慢）；1.8 → 3.7 字/秒（接近自然）
+#   本地 GPT-SoVITS 同文本约 4.6 字/秒。可用 tools/minimax_speed_test.py 复测。
+MINIMAX_SPEED = float(os.getenv("MINIMAX_SPEED", "1.8"))
+MINIMAX_TIMEOUT = int(os.getenv("MINIMAX_TIMEOUT", "120"))
+HAS_MINIMAX_KEY = bool(MINIMAX_API_KEY) and not MINIMAX_API_KEY.startswith("sk-xxx")
+
 MAX_HISTORY_MESSAGES = int(os.getenv("MAX_HISTORY_MESSAGES", "20"))
 MOCK_MODE = _flag("MOCK_MODE")
 
@@ -41,6 +58,8 @@ VISION_JPEG_QUALITY = int(os.getenv("VISION_JPEG_QUALITY", "80"))
 VISION_PREVIEW_FPS = int(os.getenv("VISION_PREVIEW_FPS", "5"))
 
 # ===== 语音输入（STT：按住说话） =====
+# 转写通道：local-whisper（本地，约 1GB 内存）/ minimax（云端 API，几乎不吃内存）
+STT_TRANSCRIBER = os.getenv("STT_TRANSCRIBER", "local-whisper").strip().lower()
 # Whisper 模型：tiny / base / small / medium（首次使用自动下载，越大越准越慢）
 STT_MODEL = os.getenv("STT_MODEL", "small").strip()
 # 识别语言：zh / ja / en 等；留空 = 自动检测

@@ -35,6 +35,8 @@ class SpeechToText:
         self.language = config.STT_LANGUAGE or None
         self.sample_rate = config.STT_SAMPLE_RATE
         self.min_duration = config.STT_MIN_DURATION
+        # 转写通道：local-whisper（本地，约 1GB 内存）/ minimax（云端 API）
+        self.transcriber = config.STT_TRANSCRIBER
 
         self._model = None
         self._model_lock = threading.Lock()
@@ -47,8 +49,13 @@ class SpeechToText:
         self._record_lock = threading.Lock()
         self._record_started_at = 0.0
 
-        # 后台预加载模型，避免启动阻塞（首次需联网下载）
-        threading.Thread(target=self._ensure_model, daemon=True).start()
+        # 只有走本地 Whisper 才预加载模型。
+        # 用 API 转写时完全不碰 Whisper —— 省下约 1GB 内存，
+        # 这正是「手机化 / 低配机器」需要的效果。
+        if self.transcriber == "local-whisper":
+            threading.Thread(target=self._ensure_model, daemon=True).start()
+        else:
+            self._status = "ready"
 
     # ---------- 模型 ----------
 
@@ -145,7 +152,17 @@ class SpeechToText:
 
     # ---------- 转写 ----------
 
-    def _transcribe(self, audio):
+    def _transcribe(self, audio) -> str:
+        """按配置的通道转写。"""
+        if self.transcriber == "minimax":
+            try:
+                return self._transcribe_minimax(audio)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[STT] MiniMax 转写失败，回退本地 Whisper：{exc}")
+                # 回退是有意的：网络抖动不该让用户「按了说话却什么都没发生」
+        return self._transcribe_whisper(audio)
+
+    def _transcribe_whisper(self, audio) -> str:
         model = self._ensure_model()
         if model is None:
             return ""
@@ -160,3 +177,57 @@ class SpeechToText:
         except Exception as exc:  # noqa: BLE001
             print(f"[STT] 转写失败：{exc}")
             return ""
+
+    def _transcribe_minimax(self, audio) -> str:
+        """走 MiniMax ASR。
+
+        官方明确说识别不依赖高采样率与立体声，我们录的就是单声道
+        ``STT_SAMPLE_RATE``（默认 16k），可以直接上传，不需要重采样。
+
+        ⚠️ 传入的 ``audio`` 必须是 ``self.sample_rate`` 采样的裸 PCM。
+        若从别处（例如 32k 的参考音频）拿数据进来，**必须自己先重采样** ——
+        ``soundfile.write`` 不会重采样，只会改采样率标记，
+        结果会把音频变成半速低音，ASR 自然认错。
+
+        规格见 https://platform.minimaxi.com/docs/api-reference/speech-to-text
+        """
+        import io
+
+        import requests
+        import soundfile as sf
+
+        if not config.HAS_MINIMAX_KEY:
+            raise RuntimeError("未配置 MINIMAX_API_KEY")
+
+        buf = io.BytesIO()
+        sf.write(
+            buf,
+            audio.astype("float32"),
+            self.sample_rate,
+            format="WAV",
+            subtype="PCM_16",
+        )
+        wav_bytes = buf.getvalue()
+
+        headers = {"Authorization": f"Bearer {config.MINIMAX_API_KEY}"}
+        if self.language:
+            headers["language"] = self.language      # BCP-47，如 zh / ja
+
+        resp = requests.post(
+            f"{config.MINIMAX_BASE_URL}/v1/speech_to_text",
+            headers=headers,
+            data={"model": config.MINIMAX_ASR_MODEL, "response_format": "json"},
+            files={"file": ("speech.wav", wav_bytes, "audio/wav")},
+            timeout=config.MINIMAX_TIMEOUT,
+        )
+        data = resp.json()
+        base = data.get("base_resp") or {}
+        code = base.get("status_code")
+        if resp.status_code != 200 or code not in (0, None):
+            raise RuntimeError(
+                f"HTTP {resp.status_code} code={code} {base.get('status_msg')}"
+            )
+        text = (data.get("text") or "").strip()
+        if text:
+            print(f"[STT] MiniMax 转写 {data.get('duration', '?')}s -> {text[:40]}")
+        return text

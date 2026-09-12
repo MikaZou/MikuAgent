@@ -54,6 +54,18 @@ VISION_RULES = """
 - 自然地融入对话，不要像在做图像描述任务一样逐条罗列。
 """
 
+# 这段**始终注入**。原因：如果只在上传了图片时才注入视觉规则，那么
+# 「上一轮有图、这一轮没图」时模型会顺着上文继续假装看得见 ——
+# 实测发生过：主人问「你看得到我手上拿的是什么吗」而这一轮并没有附图，
+# 模型却接着上一张图编出「画面糊成一团，只能看到模糊的轮廓」。
+VISION_BOUNDARY = """
+【关于「看见」】
+- 你只有在主人**随这一轮消息**发来画面时才能看到东西；其余时候你是看不见的。
+- 如果主人问「你看得到吗」「我手上拿的是什么」而这一轮并没有附带画面，
+  要老实说这次没收到画面，并提示主人可以点 📹 开启视频对话、或点 🖥️ 让你看屏幕。
+- **不要根据上文的残留印象假装看见了什么，更不要为了迎合而编造画面内容。**
+"""
+
 
 def build_system_prompt(
     user_name: Optional[str] = None,
@@ -63,7 +75,8 @@ def build_system_prompt(
 ) -> str:
     """根据人设、用户昵称与长期记忆，构建系统提示词。
 
-    vision=True 时追加视觉规则（仅在本次请求附带图片时启用）。
+    vision=True 时追加本次画面的视觉规则；VISION_BOUNDARY 则始终注入，
+    用于防止「上一轮有图、这一轮没图」时的幻觉。
     """
     parts = [
         f"你是{PERSONA_NAME}，一位 16 岁的虚拟歌姬。{PERSONA_PROFILE['身份']}",
@@ -77,13 +90,12 @@ def build_system_prompt(
         SPEECH_STYLE.strip(),
         "",
         EMOTION_RULES.strip(),
-        "",
     ]
     if user_name:
         parts.append(f"【用户】用户希望被你称为「{user_name}」。")
     if memory_text.strip():
         parts.append(MEMORY_TEMPLATE.format(memory_text=memory_text.strip()))
-    parts += ["", TOOL_RULES.strip()]
+    parts += ["", TOOL_RULES.strip(), "", VISION_BOUNDARY.strip()]
     if vision:
         parts += ["", VISION_RULES.strip()]
     parts += ["", BOUNDARY_RULES.strip()]

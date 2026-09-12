@@ -115,7 +115,8 @@ def split_sentences(text: str, max_len: int = 40) -> list[str]:
 
 
 # 情感 → (语速, 音调)。复用 agent 已经解析出的情感标签当语气。
-EMOTION_PROSODY = {    "HAPPY": ("+8%", "+35Hz"),
+EMOTION_PROSODY = {
+    "HAPPY": ("+8%", "+35Hz"),
     "SAD": ("-8%", "+10Hz"),
     "ANGRY": ("+6%", "+12Hz"),
     "SURPRISED": ("+6%", "+45Hz"),
@@ -123,6 +124,20 @@ EMOTION_PROSODY = {    "HAPPY": ("+8%", "+35Hz"),
     "EMPATHY": ("-5%", "+20Hz"),
     "NORMAL": ("+0%", "+25Hz"),
 }
+
+# 情感 → MiniMax 的 voice_setting.emotion
+# （官方支持的取值见 /v1/t2a_v2；比 sovits 只能调 speed 表达力更强）
+MINIMAX_EMOTION = {
+    "HAPPY": "happy",
+    "SAD": "sad",
+    "ANGRY": "angry",
+    "SURPRISED": "surprised",
+    "MOTIVATED": "happy",
+    "EMPATHY": "neutral",
+    "NORMAL": "neutral",
+}
+# 没配克隆音色时的兜底系统音色（少女音）
+MINIMAX_FALLBACK_VOICE = "female-shaonv"
 
 
 class TextToSpeech:
@@ -144,6 +159,8 @@ class TextToSpeech:
         self._gsv = None
         self._server = None          # sovits 合成服务子进程
         self._server_log = None
+        # 保护「检查端口 + 启动服务」这一段，避免后台预热与首次合成竞争出两个进程
+        self._server_lock = threading.Lock()
 
         try:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -209,10 +226,19 @@ class TextToSpeech:
         print(f"[TTS] 已启动合成服务进程 pid={self._server.pid}（日志 data/tts-server.log）")
 
     def _ensure_server(self, wait: bool = True) -> bool:
-        if self._port_open():
-            return True
-        if self._server is None or self._server.poll() is not None:
-            self._spawn_server()
+        """确保合成服务在跑。
+
+        这里必须加锁：``__init__`` 会起一个后台线程预热，而用户可能在预热还没
+        完成时就已经发了消息（``synthesize`` 走同一路径）。两个线程都能看到
+        「端口没开 + self._server is None」，于是**各启动一个服务进程** ——
+        两个进程各加载约 2.4GB 模型，显存直接翻倍到 OOM。
+        """
+        with self._server_lock:
+            if self._port_open():
+                return True
+            if self._server is None or self._server.poll() is not None:
+                self._spawn_server()
+
         if not wait:
             return False
 
@@ -220,9 +246,11 @@ class TextToSpeech:
         while time.time() < deadline:
             if self._port_open():
                 return True
-            if self._server.poll() is not None:
+            with self._server_lock:
+                proc = self._server
+            if proc is not None and proc.poll() is not None:
                 raise RuntimeError(
-                    f"合成服务进程退出（code={self._server.returncode}），"
+                    f"合成服务进程退出（code={proc.returncode}），"
                     "详见 data/tts-server.log"
                 )
             time.sleep(0.5)
@@ -249,6 +277,11 @@ class TextToSpeech:
             if self._status in ("loading", "ready", "error"):
                 return self._status
             return self._sovits_available()
+        if self.engine == "minimax":
+            # 已经跑过一次就沿用真实结果（成功/失败），否则只做静态检查
+            if self._status in ("ready", "error"):
+                return self._status
+            return self._minimax_status()
         return "unavailable"
 
     @staticmethod
@@ -304,6 +337,8 @@ class TextToSpeech:
                     path = self._synth_edge(clean, emotion, cached)
                 elif self.engine == "sovits":
                     path = self._synth_sovits(clean, emotion, cached)
+                elif self.engine == "minimax":
+                    path = self._synth_minimax(clean, emotion, cached)
                 else:
                     return None
             except Exception as exc:  # noqa: BLE001
@@ -462,4 +497,101 @@ class TextToSpeech:
             raise RuntimeError(f"合成服务声称成功但文件不存在：{path}")
         self._status = "ready"
         return path
+
+    # --------------------------------------------------------------- minimax
+    def _synth_minimax(self, text: str, emotion: str, out_wav: Path) -> Optional[Path]:
+        """MiniMax 云端合成（初音克隆音色）。
+
+        相比本地 GPT-SoVITS：省掉约 1.4~2.2GB 显存 + 2.9GB 内存，
+        也不需要启动服务和预热，代价是需要联网与按量计费。
+
+        官方规格见 https://platform.minimaxi.com/docs/api-reference/speech-t2a-http
+        """
+        import requests
+
+        if not config.HAS_MINIMAX_KEY:
+            raise RuntimeError("未配置 MINIMAX_API_KEY（TTS_ENGINE=minimax 时必填）")
+
+        voice_id = config.MINIMAX_VOICE_ID or MINIMAX_FALLBACK_VOICE
+        payload = {
+            "model": config.MINIMAX_TTS_MODEL,
+            "text": text,
+            "stream": False,
+            "voice_setting": {
+                "voice_id": voice_id,
+                # 克隆自 v4c 发布会致辞，那段本身语速偏慢；
+                # 实测 speed=1.0 只有 2.2 字/秒，1.8 才接近自然的 3.7 字/秒。
+                "speed": config.MINIMAX_SPEED,
+                "vol": 1.0,
+                "pitch": 0,
+                "emotion": MINIMAX_EMOTION.get((emotion or "NORMAL").upper(), "neutral"),
+            },
+            "audio_setting": {
+                "sample_rate": 32000,
+                "bitrate": 128000,
+                "format": "mp3",
+                "channel": 1,
+            },
+        }
+
+        resp = requests.post(
+            f"{config.MINIMAX_BASE_URL}/v1/t2a_v2",
+            headers={
+                "Authorization": f"Bearer {config.MINIMAX_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=config.MINIMAX_TIMEOUT,
+        )
+        try:
+            data = resp.json()
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"MiniMax 返回非 JSON（HTTP {resp.status_code}）：{exc}") from exc
+
+        base = data.get("base_resp") or {}
+        code = base.get("status_code")
+        if resp.status_code != 200 or code not in (0, None):
+            hint = ""
+            if code == 1004:
+                hint = "（鉴权失败，检查 MINIMAX_API_KEY）"
+            elif code == 1008:
+                hint = "（余额不足）"
+            elif code == 2056:
+                hint = "（音色不存在或已过期，克隆音色 7 天未使用会被删除，需重新克隆）"
+            raise RuntimeError(
+                f"MiniMax 合成失败 HTTP {resp.status_code} "
+                f"code={code} {base.get('status_msg')}{hint}"
+            )
+
+        audio_hex = (data.get("data") or {}).get("audio") or ""
+        if not audio_hex:
+            raise RuntimeError("MiniMax 没有返回音频数据")
+
+        # 返回的是 hex 编码的 mp3，先落临时文件再转 WAV
+        tmp_mp3 = out_wav.with_name(out_wav.stem + ".mm.tmp.mp3")
+        tmp_mp3.write_bytes(bytes.fromhex(audio_hex))
+        try:
+            self._mp3_to_wav(tmp_mp3, out_wav, target_rate=32000)
+        finally:
+            try:
+                tmp_mp3.unlink()
+            except OSError:
+                pass
+
+        self._status = "ready"
+        info = data.get("extra_info") or {}
+        print(f"[TTS] MiniMax 合成 {info.get('audio_length', '?')}ms / "
+              f"计费 {info.get('usage_characters', '?')} 字")
+        return out_wav
+
+    @staticmethod
+    def _minimax_status() -> str:
+        """只检查是否配了 Key 与依赖，不真的发请求（避免每次开面板都计费）。"""
+        import importlib.util
+
+        if importlib.util.find_spec("requests") is None:
+            return "unavailable"
+        if not config.HAS_MINIMAX_KEY:
+            return "unavailable"
+        return "ready"
 

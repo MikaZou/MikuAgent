@@ -133,7 +133,10 @@ class InputBar(QFrame):
             #micButton {
                 border: none;
                 border-radius: 11px;
-                padding: 6px 6px;
+                /* 图标按钮用 setFixedSize 定尺寸，padding 必须为 0：
+                   32px 减去左右 padding 后装不下 21px 宽的 emoji，
+                   Qt 会把文字省略成 "..."。 */
+                padding: 0px;
                 font-size: 16px;
                 background: rgba(57, 197, 187, 0.14);
             }
@@ -145,7 +148,7 @@ class InputBar(QFrame):
             #videoButton, #screenButton {
                 border: none;
                 border-radius: 11px;
-                padding: 5px 6px;
+                padding: 0px;
                 font-size: 15px;
                 background: rgba(57, 197, 187, 0.14);
             }
