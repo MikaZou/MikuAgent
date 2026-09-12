@@ -352,3 +352,85 @@ class RemoteServer:
             fut.result(timeout=5)
         except Exception:  # noqa: BLE001
             pass
+
+
+class RemoteController:
+    """按 config 管理远程服务的启停，支持**运行中**改配置。
+
+    以前 ``REMOTE_ENABLED`` 只在启动时读一次，用户在设置面板里改了开关
+    必须重启程序才生效 —— 现在改完立刻调 ``sync()`` 就行。
+
+    重启时必须等旧线程真的退出（端口释放）再 bind，否则会撞
+    「端口被占用」而静默失败。
+    """
+
+    def __init__(self, agent, tts, stt, memory, on_ready=None) -> None:
+        self._agent = agent
+        self._tts = tts
+        self._stt = stt
+        self._memory = memory
+        self._on_ready = on_ready
+        self._server = None
+        self._port = None
+        self._lock = threading.Lock()
+
+    @property
+    def server(self):
+        return self._server
+
+    @property
+    def running(self) -> bool:
+        return self._server is not None
+
+    def sync(self) -> str:
+        """让服务状态与当前 config 一致。
+
+        返回 started / stopped / restarted / unchanged / failed。
+        """
+        with self._lock:
+            want = bool(config.REMOTE_ENABLED)
+            port = int(config.REMOTE_PORT)
+
+            if self._server is not None and not want:
+                self._stop_locked()
+                return "stopped"
+
+            if self._server is None:
+                if not want:
+                    return "unchanged"
+                return "started" if self._start_locked(port) else "failed"
+
+            if self._port != port:
+                self._stop_locked()
+                return "restarted" if self._start_locked(port) else "failed"
+
+            return "unchanged"
+
+    def _start_locked(self, port: int) -> bool:
+        server = RemoteServer(
+            self._agent, self._tts, self._stt, self._memory, on_ready=self._on_ready
+        )
+        if not server.start():
+            return False
+        self._server = server
+        self._port = port
+        return True
+
+    def _stop_locked(self) -> None:
+        server = self._server
+        self._server = None
+        self._port = None
+        if server is None:
+            return
+        try:
+            server.stop()
+            thread = getattr(server, "_thread", None)
+            if thread is not None:
+                # 等端口真的释放；不等的话紧接着的重启会 bind 失败
+                thread.join(timeout=6)
+        except Exception as exc:  # noqa: BLE001
+            _log(f"停止远程服务出错：{exc}")
+
+    def stop(self) -> None:
+        with self._lock:
+            self._stop_locked()

@@ -226,6 +226,10 @@ class TextToSpeech:
         self._server_log = None
         # 保护「检查端口 + 启动服务」这一段，避免后台预热与首次合成竞争出两个进程
         self._server_lock = threading.Lock()
+        # 「还需要 sovits 服务吗」。预热线程是异步的：用户可能在它还没
+        # spawn 之前就切走或退出，只有旗标能让它收手，否则会留下一个
+        # 占着 2.2GB 显存的野进程（实测复现过）。
+        self._server_wanted = self.engine == "sovits"
 
         try:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -240,8 +244,10 @@ class TextToSpeech:
     def _preload(self) -> None:
         """后台把合成服务拉起来（首次要加载约 2.4GB 模型，约 20s）。"""
         try:
-            self._ensure_server(wait=True)
-            print("[TTS] GPT-SoVITS 服务已就绪（初音音色）")
+            if self._ensure_server(wait=True):
+                print("[TTS] GPT-SoVITS 服务已就绪（初音音色）")
+            else:
+                print("[TTS] 预热中止（引擎已被切走或程序退出）")
         except Exception as exc:  # noqa: BLE001
             print(f"[TTS] 服务启动失败：{exc}")
 
@@ -299,6 +305,9 @@ class TextToSpeech:
         两个进程各加载约 2.4GB 模型，显存直接翻倍到 OOM。
         """
         with self._server_lock:
+            if not self._server_wanted:
+                # 已经被切走/关闭，别再拉进程出来当野进程
+                return False
             if self._port_open():
                 return True
             if self._server is None or self._server.poll() is not None:
@@ -309,10 +318,12 @@ class TextToSpeech:
 
         deadline = time.time() + config.TTS_SERVER_TIMEOUT
         while time.time() < deadline:
+            with self._server_lock:
+                if not self._server_wanted:
+                    return False
+                proc = self._server
             if self._port_open():
                 return True
-            with self._server_lock:
-                proc = self._server
             if proc is not None and proc.poll() is not None:
                 raise RuntimeError(
                     f"合成服务进程退出（code={proc.returncode}），"
@@ -321,15 +332,99 @@ class TextToSpeech:
             time.sleep(0.5)
         raise TimeoutError(f"合成服务 {config.TTS_SERVER_TIMEOUT}s 内未就绪")
 
+    def _stop_server(self, timeout: float = 10.0) -> bool:
+        """停掉 GPT-SoVITS 合成服务进程，并**等它真正退出**。
+
+        必须等进程消失而不是只 terminate()：只有进程退出，CUDA 上下文才会
+        释放，那约 2.2GB 显存才算真的还回去。用户从本地切到云端时，
+        这是最关键的收益——不等的话显存还占着，桌宠照样卡。
+
+        整个过程持 ``_server_lock``：否则会和预热线程的 spawn 交错，
+        出现「刚停掉又被拉起来」的野进程（实测复现过）。
+
+        返回是否真的停掉了一个进程。
+        """
+        with self._server_lock:
+            proc = getattr(self, "_server", None)
+            log = getattr(self, "_server_log", None)
+            self._server = None
+            self._server_log = None
+
+            if log is not None:
+                try:
+                    log.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
+            if proc is None:
+                return False
+
+            if proc.poll() is None:
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=timeout)
+                except Exception:  # noqa: BLE001
+                    # 不听话就强杀，否则显存会一直被占
+                    try:
+                        proc.kill()
+                        proc.wait(timeout=5)
+                    except Exception:  # noqa: BLE001
+                        pass
+            return True
+
     def shutdown(self) -> None:
-        """退出时收掉服务进程。"""
-        proc = getattr(self, "_server", None)
-        if proc is not None and proc.poll() is None:
+        """退出/切换引擎时收掉服务进程。"""
+        self._server_wanted = False   # 先立旗，让在飞的预热线程收手
+        self._stop_server()
+
+    def reconfigure(self) -> dict:
+        """按最新 config **就地**切换 TTS 引擎（对象身份不变）。
+
+        为什么不能只改 .env 重启了事：``engine``/``voice`` 等在 ``__init__``
+        就固化成实例字段了；而且换引擎必须真正释放旧引擎独占的资源 ——
+        本地 GPT-SoVITS 是独立进程 + 约 2.2GB 显存，切走时不停掉它，
+        显存会一直占着。
+
+        就地改而不是重建对象，是因为 ``PetWindow`` 和 ``RemoteServer``
+        都持有这个实例的引用，换对象要重新接线，容易漏。
+        """
+        with self._lock:
+            old = self.engine
+            new = config.TTS_ENGINE
+
+            # 0) 先立旗：如果旧引擎的预热线程还在飞，让它立刻收手，
+            #    否则它会在这个函数返回之后才 spawn，留下占显存的野进程
+            self._server_wanted = new == "sovits"
+
+            # 1) 先释放旧引擎独占的资源
+            if old == "sovits" and new != "sovits":
+                freed = self._stop_server()
+                if freed:
+                    print("[TTS] 已停止 GPT-SoVITS 服务进程，释放显存")
+
+            # 2) 刷新配置字段
+            self.engine = new
+            self.voice = config.TTS_VOICE
+            self.base_rate = config.TTS_RATE
+            self.base_pitch = config.TTS_PITCH
+            self.volume = config.TTS_VOLUME
+            self.device = config.TTS_DEVICE
+            self.max_chars = config.TTS_MAX_CHARS
+            self.cache_dir = Path(config.TTS_CACHE_DIR)
             try:
-                proc.terminate()
+                self.cache_dir.mkdir(parents=True, exist_ok=True)
             except Exception:  # noqa: BLE001
                 pass
-        self._server = None
+            self._detail = ""
+            self._status = "disabled" if new == "none" else "idle"
+
+            # 3) 拉起新引擎（耗时操作一律丢后台，别卡住界面）
+            if new == "sovits":
+                self._status = "loading"
+                threading.Thread(target=self._preload, daemon=True).start()
+
+        print(f"[TTS] 引擎已切换：{old} → {new}")
+        return {"engine": new, "previous": old, "changed": old != new}
 
     # ------------------------------------------------------------------ 状态
     @property

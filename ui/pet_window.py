@@ -145,6 +145,7 @@ class PetWindow(Live2DView):
         self.settings_dialog.tts_toggled.connect(self._on_tts_toggled)
         self.settings_dialog.stt_toggled.connect(self._on_stt_toggled)
         self.settings_dialog.video_toggled.connect(self.set_video_enabled)
+        self.settings_dialog.reconfigure_requested.connect(self.open_reconfigure)
         self.tray = Tray(self, self.open_settings, self.quit_app)
         self.tray.show()
 
@@ -577,7 +578,8 @@ class PetWindow(Live2DView):
             ]), "HAPPY", 3500)
 
     # ---------------------------------------------------------------- 设置
-    def open_settings(self) -> None:
+    def _settings_state(self) -> tuple:
+        """收集设置面板要显示的状态。"""
         health = {
             "mock": not getattr(self.agent, "live", False),
             "has_api_key": config.HAS_API_KEY,
@@ -592,10 +594,117 @@ class PetWindow(Live2DView):
             nickname = self.memory.get_meta("user_name") or ""
         except Exception:  # noqa: BLE001
             pass
-        self.settings_dialog.load_state(health, stt_status, tts_status, nickname)
+        return health, stt_status, tts_status, nickname
+
+    def open_settings(self) -> None:
+        self.settings_dialog.load_state(*self._settings_state())
         self.settings_dialog.show()
         self.settings_dialog.raise_()
         self.settings_dialog.activateWindow()
+
+    @staticmethod
+    def reload_config() -> None:
+        """重新读 .env 并 reload config 模块。
+
+        config 的属性是模块导入时算好的常量，向导改的是 .env 文件，
+        所以必须 load_dotenv(override=True) + reload 才能看到新值。
+        """
+        import importlib
+
+        from dotenv import load_dotenv
+
+        load_dotenv(config.BASE_DIR / ".env", override=True)
+        importlib.reload(config)
+
+    def open_reconfigure(self) -> None:
+        """打开首次设置向导的「编辑模式」，改完**立即生效**，无需重启。
+
+        这是本方法存在的理由 —— 光把值写进 .env 是不够的：
+          * TTS/STT 的 engine / transcriber 在 ``__init__`` 就固化成实例字段
+          * 本地 GPT-SoVITS 是**独立进程**且占约 2.2GB 显存，
+            切到云端时不停掉它，显存会一直占着
+          * Whisper 占约 1GB 内存，切到云端要卸载
+          * REMOTE_ENABLED 以前只在启动时读一次
+
+        所以这里：写 .env → reload config → 就地 reconfigure 各组件。
+        就地改而不是重建对象，是因为 RemoteServer 等也持有同一批引用。
+        """
+        from PySide6.QtWidgets import QDialog
+
+        from ui.setup_wizard import SetupWizard
+
+        dialog = SetupWizard(self, edit_mode=True)
+        # 称呼存在记忆库里、不在 .env，所以要单独回填
+        try:
+            dialog.nickname.setText(self.memory.get_meta("user_name") or "")
+        except Exception:  # noqa: BLE001
+            pass
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        changed = dialog.apply()
+        print(f"[Setup] 设置已更新：{changed}")
+        self.reload_config()
+
+        notes: list[str] = []
+
+        # ---- 1) TTS 引擎（可能触发拉起/停掉 GPT-SoVITS 进程）----
+        try:
+            info = self.tts.reconfigure() if self.tts else {}
+            if info.get("changed"):
+                notes.append(f"语音输出 {info['previous']} → {info['engine']}")
+                if info["engine"] == "sovits":
+                    notes.append("正在后台加载 GPT-SoVITS（首次约 15 秒）")
+        except Exception as exc:  # noqa: BLE001
+            notes.append(f"语音输出切换失败：{exc}")
+
+        # ---- 2) STT 通道（可能卸载/加载 Whisper）----
+        try:
+            info = self.stt.reconfigure() if self.stt else {}
+            if info.get("changed"):
+                notes.append(f"语音输入 {info['previous']} → {info['transcriber']}")
+                if info["transcriber"] == "local-whisper":
+                    notes.append("正在后台加载 Whisper")
+        except Exception as exc:  # noqa: BLE001
+            notes.append(f"语音输入切换失败：{exc}")
+
+        # ---- 3) 称呼 ----
+        name = dialog.nickname.text().strip()
+        if name:
+            try:
+                self.memory.set_meta("user_name", name)
+                notes.append(f"称呼：{name}")
+            except Exception as exc:  # noqa: BLE001
+                print(f"[Setup] 保存称呼失败：{exc}")
+
+        # ---- 4) 视频对话（向导写 .env，设置面板读 QSettings，这里对齐两者）----
+        video_on = dialog.video.isChecked()
+        self.settings_dialog.settings.setValue("video_enabled", video_on)
+        if video_on != self._video_enabled:
+            self.set_video_enabled(video_on)
+            notes.append("视频对话：" + ("开" if video_on else "关"))
+
+        # ---- 5) 远程服务启停 ----
+        controller = getattr(self, "remote_controller", None)
+        if controller is not None:
+            try:
+                action = controller.sync()
+                if action == "started":
+                    notes.append("手机端：已开启")
+                elif action == "stopped":
+                    notes.append("手机端：已关闭")
+                elif action == "restarted":
+                    notes.append("手机端：已用新端口重启")
+                elif action == "failed":
+                    notes.append("手机端启动失败，见 data/remote.log")
+            except Exception as exc:  # noqa: BLE001
+                notes.append(f"手机端切换失败：{exc}")
+
+        # ---- 6) 刷新面板 + 气泡反馈 ----
+        self.settings_dialog.load_state(*self._settings_state())
+        message = "设置已更新♪" + ("\n" + "· ".join(notes) if notes else "")
+        self.bubble.show_message(message, "HAPPY", 6000)
 
     def save_nickname(self, name: str) -> None:
         try:

@@ -26,6 +26,8 @@ class SettingsDialog(QDialog):
     tts_toggled = Signal(bool)
     stt_toggled = Signal(bool)
     video_toggled = Signal(bool)
+    # 请求打开「首次设置向导」的编辑模式（改引擎 / API Key / 手机端等）
+    reconfigure_requested = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -41,6 +43,12 @@ class SettingsDialog(QDialog):
                 border-radius: 8px; padding: 7px 14px; font-weight: 600;
             }
             QPushButton:hover { background: #2fb3a9; }
+            QPushButton#ghost {
+                background: #ffffff; color: #0f766e;
+                border: 1px solid #99e0da; font-weight: 600;
+                padding: 7px 12px;
+            }
+            QPushButton#ghost:hover { background: #eafaf8; }
             """
         )
         self.settings = QSettings(ORG, APP)
@@ -58,12 +66,23 @@ class SettingsDialog(QDialog):
         self._nickname.setPlaceholderText("例如：主人 / 小名")
         save_btn = QPushButton("保存称呼")
 
+        # 改引擎 / API Key / 手机端这些「首次设置」项，都从这一个入口进，
+        # 避免设置面板和向导两套 UI 各改一半、状态对不上。
+        reconf_btn = QPushButton("⚙ 修改配置")
+        reconf_btn.setObjectName("ghost")
+        reconf_btn.setToolTip(
+            "重新打开首次设置向导：语音引擎（本地/云端）、API Key、"
+            "视频对话、手机端。保存后立即生效，无需重启。"
+        )
+        reconf_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+
         form = QFormLayout()
         form.addRow("运行模式", self._mode)
         form.addRow("API Key", self._key)
         form.addRow("模型", self._model)
         form.addRow("语音输出引擎", self._tts_status)
         form.addRow("语音输入引擎", self._stt_status)
+        form.addRow("", reconf_btn)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(18, 18, 18, 18)
@@ -93,12 +112,16 @@ class SettingsDialog(QDialog):
         nick_row.addWidget(save_btn)
         root.addLayout(nick_row)
 
-        tip = QLabel("💡 在 .env 中配置 DEEPSEEK_API_KEY / TTS_* 后重启即可生效。")
+        tip = QLabel(
+            "💡 换引擎、改 API Key、开关手机端，都点上面的「修改配置」，保存后立即生效、不用重启。"
+            "切到本地 GPT-SoVITS 会在后台加载（首次约 15 秒），加载期间 Miku 暂时没有声音。"
+        )
         tip.setObjectName("tip")
         tip.setWordWrap(True)
         root.addWidget(tip)
 
         save_btn.clicked.connect(self._on_save_nickname)
+        reconf_btn.clicked.connect(self.reconfigure_requested.emit)
         self._tts_check.toggled.connect(self._on_tts)
         self._stt_check.toggled.connect(self._on_stt)
         self._video_check.toggled.connect(self._on_video)

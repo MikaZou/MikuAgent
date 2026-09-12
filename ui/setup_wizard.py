@@ -44,6 +44,11 @@ QLineEdit {
     border: 1px solid #cbd5e1; border-radius: 8px; padding: 7px 10px;
     font-size: 13px; background: #ffffff;
 }
+QPushButton {
+    background: #e5eaec; color: #1f2430; border: none; border-radius: 9px;
+    padding: 10px 18px; font-size: 14px;
+}
+QPushButton:hover { background: #d7dee1; }
 QPushButton#primary {
     background: #39c5bb; color: #fff; border: none; border-radius: 9px;
     padding: 10px 22px; font-size: 14px; font-weight: 600;
@@ -77,9 +82,10 @@ class SetupWizard(QDialog):
         ("本地 Whisper", "约 1GB 内存 · 离线可用", "local-whisper"),
     ]
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent=None, edit_mode: bool = False) -> None:
         super().__init__(parent)
-        self.setWindowTitle("MikuAgent 首次设置")
+        self.edit_mode = edit_mode
+        self.setWindowTitle("MikuAgent 设置" if edit_mode else "MikuAgent 首次设置")
         self.setMinimumWidth(520)
         self.setStyleSheet(QSS)
 
@@ -89,10 +95,15 @@ class SetupWizard(QDialog):
         root.setContentsMargins(22, 20, 22, 20)
         root.setSpacing(12)
 
-        title = QLabel("欢迎使用 MikuAgent ♪")
+        title = QLabel("修改设置" if edit_mode else "欢迎使用 MikuAgent ♪")
         title.setObjectName("h1")
         root.addWidget(title)
         sub = QLabel(
+            "改完点「保存并应用」会**立即生效**，不需要重启："
+            "从云端切到本地会自动拉起 GPT-SoVITS 服务（首次约 15 秒），"
+            "从本地切到云端会自动停掉它并把显存释放掉。"
+            if edit_mode
+            else
             "第一次运行需要填一下密钥、选一下「语音怎么走」。选错了也没关系，"
             "随时可以改 .env 或在设置面板里调整。"
         )
@@ -171,7 +182,12 @@ class SetupWizard(QDialog):
         # ---------------- 按钮 ----------------
         btn_row = QHBoxLayout()
         btn_row.addStretch(1)
-        btn = QPushButton("开始使用")
+        if edit_mode:
+            cancel = QPushButton("取消")
+            cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+            cancel.clicked.connect(self.reject)
+            btn_row.addWidget(cancel)
+        btn = QPushButton("保存并应用" if edit_mode else "开始使用")
         btn.setObjectName("primary")
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.clicked.connect(self.accept)

@@ -101,7 +101,7 @@ def main() -> int:
     try:
         from PySide6.QtCore import QObject, Signal
 
-        from remote_server import RemoteServer
+        from remote_server import RemoteController
 
         class _RemoteBridge(QObject):
             """把服务线程的「就绪」事件排队回主线程。
@@ -117,11 +117,13 @@ def main() -> int:
         # 必须留引用，否则 QObject 被回收、信号断掉
         window._remote_bridge = bridge
 
-        remote = RemoteServer(
+        remote = RemoteController(
             agent, tts, stt, memory,
             on_ready=lambda urls, info: bridge.ready.emit(urls, info),
         )
-        remote.start()
+        remote.sync()
+        # 设置面板改完配置要能启停远程服务，所以把控制器交给窗口
+        window.remote_controller = remote
     except Exception as exc:  # noqa: BLE001
         print(f"[Remote] 启动失败（不影响桌宠）：{exc}")
 

@@ -1414,6 +1414,78 @@ daemon 线程，起不来也只打日志、不影响桌宠。
 
 ---
 
+### 5.7 运行中切换引擎（**已完成**）
+
+设置面板新增「⚙ 修改配置」按钮，直接打开首次设置向导的**编辑模式**，
+7 项（DeepSeek Key / TTS 引擎 / MiniMax Key / STT 通道 / 称呼 / 视频对话 / 手机端）
+都能在运行中改，保存后**立即生效，不需要重启**。
+
+#### 为什么不能只改 `.env`
+
+这是本节的重点。把新值写进 `.env` 只是第一步，真正的坑在于：
+
+| 资源 | 不释放的后果 |
+| --- | --- |
+| GPT-SoVITS 是**独立子进程** | 切到云端后它还在跑，约 2.2GB 显存一直被占，桌宠照样卡 |
+| Whisper 模型常驻内存 | 约 1GB 内存不还，所谓「云端省内存」只是纸面数字 |
+| `REMOTE_ENABLED` | 以前只在启动时读一次，改了开关必须重启 |
+| `TextToSpeech.engine` / `SpeechToText.transcriber` | 在 `__init__` 就固化成实例字段，reload config 也改不到 |
+
+所以链路是：
+
+```
+点「修改配置」→ 向导写 .env → load_dotenv(override=True) + importlib.reload(config)
+   → tts.reconfigure()  → 停旧引擎进程 / 拉新引擎（后台）
+   → stt.reconfigure()  → 卸载 / 加载 Whisper
+   → remote_controller.sync() → 启停 / 换端口重启远程服务
+   → 刷新面板 + 气泡反馈
+```
+
+用**就地 reconfigure 而不是重建对象**：`RemoteServer` 等也持有这同一批
+引用，换对象就要重新接线，容易漏一处就静默失效。
+
+#### 实测数据（`tools/test_engine_switch.py`）
+
+| 动作 | 结果 |
+| --- | --- |
+| 云端 → 本地 | `reconfigure()` 立即返回（0.00s，预热在后台）；36.8s 服务就绪 |
+| | 显存 `449 → 2011 MiB`（+1562）；合成出 2.80s 音频 |
+| 本地 → 云端 | 子进程已退出、端口已释放、显存回到 `449 MiB`（与基线差 `+0`） |
+| STT 本地 | Whisper 4.0s 加载完，本进程内存 `57 → 390 MB` |
+| STT 切回云端 | `_model is None: True`，内存 `390 → 82 MB` |
+
+#### 踩到的坑：预热线程留下野进程
+
+预热是异步的。用户可能在它 `spawn` **之前**就切走或退出，于是这个函数
+返回之后进程才被拉起来 —— 实测留下了一个 736MB 的野进程 + 子进程，
+显存一直挂着。
+
+修法是加一个「是否还需要这个服务」的旗标 `_server_wanted`：
+
+* `reconfigure()` **第一件事**就是立旗（在停旧引擎之前）
+* `shutdown()` 先立旗再停进程
+* `_ensure_server()` 在持 `_server_lock` 时检查旗标，为假直接不 spawn
+* `_stop_server()` 全程持 `_server_lock`，避免和 spawn 交错出现「刚停掉又被拉起来」
+
+锁顺序始终是 `_lock → _server_lock`，不会死锁。
+`tools/test_engine_switch.py` 阶段 4 是这条的回归测试：
+切到本地后立刻 `shutdown()`，然后盯 45 秒确认端口始终没被占用。
+
+#### 一键复测
+
+```bash
+python tools/test_engine_switch.py    # 引擎切换 + 资源释放 + 野进程回归
+python tools/test_reconfigure_ui.py   # 按钮信号 + 远程服务启停/换端口
+python tools/test_reconfigure_e2e.py  # 真实 PetWindow 跑完整链路（会快照并还原 .env）
+```
+
+> 「⚙ 修改配置」按钮在设置面板里的位置，正好覆盖了原先那块**白色空白区**。
+> 那块白不是布局问题——离屏渲染 `SettingsDialog` 是干净的；它是真实窗口下
+> 的合成伪影：设置面板是「无边框 + 透明 + 置顶 + 带 OpenGL 子窗口」的桌宠
+> 的子窗口，GL 表面盖不住的地方就露白底。
+
+---
+
 ## 6. 附录
 
 ### 6.1 工具清单
@@ -1432,6 +1504,10 @@ daemon 线程，起不来也只打日志、不影响桌宠。
 | `tools/bench_tts.py` | 量化各长度合成耗时、情感→语速、speed 参数校验 |
 | `tools/selftest_chat.py` | 端到端自检（走 `close()` 以便触发 TTS 清理） |
 | `tools/capture_window.ps1` | 按 PID 定位窗口并截图（EnumWindows） |
+| `tools/measure_emotion_speed.py` | 标定 MiniMax 各 emotion 的实际语速（绕过缓存、交叉轮询采样） |
+| `tools/test_engine_switch.py` | 引擎切换 + 资源释放 + 预热野进程回归（见 5.7） |
+| `tools/test_reconfigure_ui.py` | 「修改配置」按钮信号 + 远程服务运行中启停/换端口 |
+| `tools/test_reconfigure_e2e.py` | 真实 PetWindow 跑完整重配链路（快照并还原 .env） |
 
 ### 6.2 本会话踩过的坑（按代价排序）
 

@@ -78,6 +78,43 @@ class SpeechToText:
                 print(f"[STT] Whisper 模型加载失败：{exc}")
             return self._model
 
+    def reconfigure(self):
+        """按最新 config **就地**切换转写通道（对象身份不变）。
+
+        切到云端时要真的把 Whisper 模型丢掉：它占约 1GB 内存，
+        不丢的话「省内存」就只是纸面数字。丢完 gc.collect() 一次，
+        否则循环引用会让内存延迟归还。
+
+        切到本地时后台加载（首次还要联网下载约 460MB），别卡住界面。
+        """
+        old = self.transcriber
+        new = config.STT_TRANSCRIBER
+
+        self.model_size = config.STT_MODEL
+        self.language = config.STT_LANGUAGE or None
+        self.sample_rate = config.STT_SAMPLE_RATE
+        self.min_duration = config.STT_MIN_DURATION
+        self.transcriber = new
+
+        if new == "local-whisper":
+            if self._model is None:
+                self._status = "loading"
+                threading.Thread(target=self._ensure_model, daemon=True).start()
+        else:
+            with self._model_lock:
+                had_model = self._model is not None
+                self._model = None
+            if had_model:
+                import gc
+
+                gc.collect()
+                print("[STT] 已卸载 Whisper 模型，释放约 1GB 内存")
+            self._status = "ready"
+            self._status_detail = ""
+
+        print(f"[STT] 转写通道已切换：{old} → {new}")
+        return {"transcriber": new, "previous": old, "changed": old != new}
+
     @property
     def status(self):
         return self._status
