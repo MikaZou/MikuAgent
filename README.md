@@ -309,6 +309,28 @@ python tools\diag_vision.py api        # 验证 DeepSeek 视觉 API 生效 + 量
 python tools\diag_vision.py pipeline   # 不需要摄像头的端到端验证
 ```
 
+## 📱 手机端（同一局域网）
+
+PC 端**仍然是原生桌宠窗口**，手机只是它的一个瘦客户端 —— 所有 AI 逻辑都在 PC 上跑。
+
+**用法**
+
+1. PC 上启动桌宠（`start.bat`），控制台会打印形如 `http://192.168.x.x:8765/` 的地址
+2. 手机连**同一个 WiFi**，浏览器打开那个地址
+3. 直接打字 / 按住 🎤 说话 / 点 📷 拍照发给她
+
+手机端能做：Live2D 渲染与口型、文字对话、语音输入、拍照给 Miku 看、情感表情动作，
+**与 PC 端用完全一致的映射**（同一张情感→表情/动作表）。
+
+**说明**
+
+- 手机需要能访问 CDN 加载 PIXI.js 与 pixi-live2d-display；受限时在 `.env` 里
+  改 `REMOTE_CDN` 为可用镜像。**Live2D 模型文件始终由 PC 提供，不依赖外网。**
+- 端口默认 `8765`（`.env` 的 `REMOTE_PORT`）；不想要就设 `REMOTE_ENABLED=false`，
+  **关掉它完全不影响 PC 端桌宠**。
+- 为什么手机端也建议走云端 TTS/STT：本地 GPT-SoVITS + Whisper 要 3.6GB 内存 +
+  2.2GB 显存，PC 自己都很紧张；切到 MiniMax 后 PC 只用 **248MB 内存 + 538MiB 显存**。
+
 ## ❓ 常见问题
 
 - **看不到 Miku / 窗口一片空白**：先跑 `python tools\smoke_live2d.py` 验证 OpenGL 与模型。若报显卡驱动问题，请更新显卡驱动。
