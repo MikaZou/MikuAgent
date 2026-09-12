@@ -84,9 +84,9 @@ def main() -> int:
 
     print()
     if bad == 0:
-        print(f"  全部 {rounds} 轮都只 spawn 一次 ✅ 竞态已修复")
+        print(f"  全部 {rounds} 轮都只 spawn 一次 [PASS] 竞态已修复")
         return 0
-    print(f"  {bad}/{rounds} 轮出现重复 spawn ❌")
+    print(f"  {bad}/{rounds} 轮出现重复 spawn [FAIL]")
     return 1
 
 

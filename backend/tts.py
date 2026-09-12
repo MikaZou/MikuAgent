@@ -387,9 +387,36 @@ class TextToSpeech:
             except OSError:
                 continue
 
+    def _voice_signature(self) -> str:
+        """音色指纹：参考音频/云端音色一变，旧缓存必须失效。
+
+        原 cache key 只有 engine|voice|rate|pitch|volume|text，换掉
+        TTS_REF_AUDIO 之后仍会命中旧音色的缓存。这里把参考音频的
+        路径 + 大小 + mtime 一并算进去。
+        """
+        parts = [self.engine, self.voice or ""]
+        if self.engine == "sovits":
+            ref = Path(config.TTS_REF_AUDIO)
+            try:
+                st = ref.stat()
+                stamp = f"{st.st_size}:{int(st.st_mtime)}"
+            except OSError:
+                stamp = "missing"
+            parts += [str(ref), stamp, config.TTS_PROMPT_TEXT or ""]
+        elif self.engine == "minimax":
+            parts += [
+                getattr(config, "MINIMAX_VOICE_ID", "") or "",
+                getattr(config, "MINIMAX_TTS_MODEL", "") or "",
+                str(getattr(config, "MINIMAX_SPEED", "")),
+            ]
+        return "|".join(parts)
+
     def _cache_key(self, text: str, emotion: str) -> str:
         rate, pitch = EMOTION_PROSODY.get((emotion or "NORMAL").upper(), (self.base_rate, self.base_pitch))
-        raw = f"{self.engine}|{self.voice}|{rate}|{pitch}|{self.volume}|{text}"
+        raw = (
+            f"{self._voice_signature()}|{rate}|{pitch}|{self.volume}"
+            f"|{(emotion or 'NORMAL').upper()}|{text}"
+        )
         return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
     # ------------------------------------------------------------------ edge
