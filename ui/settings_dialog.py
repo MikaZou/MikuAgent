@@ -166,3 +166,12 @@ class SettingsDialog(QDialog):
     @staticmethod
     def video_enabled() -> bool:
         return bool(QSettings(ORG, APP).value("video_enabled", config.VISION_ENABLED, type=bool))
+
+    @staticmethod
+    def setup_done() -> bool:
+        """是否已经跑过首次设置向导。"""
+        return bool(QSettings(ORG, APP).value("setup_done", False, type=bool))
+
+    @staticmethod
+    def mark_setup_done() -> None:
+        QSettings(ORG, APP).setValue("setup_done", True)
