@@ -135,6 +135,9 @@ class PetWindow(Live2DView):
 
         # ---------------- 子控件 ----------------
         self.bubble = SpeechBubble(self)
+        # 防重入：_layout_children 会调 bubble.set_max_height()，后者可能因
+        # 高度变化发 height_changed 再回调 _layout_children
+        self._laying_out = False
         self.bubble.hide()
 
         self.input_bar = InputBar(self)
@@ -180,6 +183,8 @@ class PetWindow(Live2DView):
         self.model_load_failed.connect(self._on_model_load_failed)
         # 气泡出现/消失时重排角标按钮：有气泡就回到顶端，没气泡就贴到初音头顶
         self.bubble.visibility_changed.connect(lambda _visible: self._layout_children())
+        # 气泡高度变了要重新对齐底部（否则下沿会跟着内容长短跑）
+        self.bubble.height_changed.connect(lambda _h: self._layout_children())
 
         # 摄像头可用时才显示 📹；没有摄像头就退化成只有 🖥️ 截屏（零依赖路径）
         self.input_bar.set_video_visible(camera_available())
@@ -221,6 +226,15 @@ class PetWindow(Live2DView):
         return max(BUTTON_MARGIN, self._model_top - BUTTON_SIZE - 10)
 
     def _layout_children(self) -> None:
+        if getattr(self, "_laying_out", False):
+            return
+        self._laying_out = True
+        try:
+            self._layout_children_inner()
+        finally:
+            self._laying_out = False
+
+    def _layout_children_inner(self) -> None:
         w, h = self.width(), self.height()
         btn_y = self._button_row_y()
         self.btn_min.move(BUTTON_MARGIN, btn_y)
@@ -235,7 +249,14 @@ class PetWindow(Live2DView):
         # 高度由气泡自己按内容算（上限 BUBBLE_MAX_H）——
         # 引入 QScrollArea 后 adjustSize() 不再随内容增长，必须显式驱动。
         self.bubble.set_max_height(BUBBLE_MAX_H)
-        self.bubble.move(max(0, (w - self.bubble.width()) // 2), BUBBLE_TOP)
+
+        # **底部对齐**：气泡下沿钉死在 BUBBLE_TOP + BUBBLE_MAX_H。
+        # 内容少时气泡向上收、内容多时向上长，下沿始终不动 ——
+        # 于是「小三角 + 与模型之间的间距」是恒定的，不会随文字长短忽大忽小。
+        # 反过来（从顶部往下长）会让短消息下方留一大片空白。
+        bubble_bottom = BUBBLE_TOP + BUBBLE_MAX_H
+        bubble_y = max(BUBBLE_TOP, bubble_bottom - self.bubble.height())
+        self.bubble.move(max(0, (w - bubble_w) // 2), bubble_y)
 
         self.input_bar.setGeometry(12, h - bar_h - 12, w - 24, bar_h)
 

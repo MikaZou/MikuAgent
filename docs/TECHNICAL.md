@@ -1517,6 +1517,44 @@ python tools/test_reconfigure_e2e.py  # 真实 PetWindow 跑完整链路（会�
        └ QLabel（wordWrap，顶对齐）
 ```
 
+#### 底部对齐：气泡下沿固定，向上生长
+
+气泡高度随内容在 72~188px 之间变化，于是「从哪里长」就成了问题：
+
+| 方案 | 结果 |
+| --- | --- |
+| 顶部固定、向下生长（最初） | 短消息（72px）时气泡下方留 **107px** 空白 |
+| 模型跟着气泡跑 | 空白只是被推到窗口底部，模型还会随每条消息跳动 |
+| **底部固定、向上生长（现方案）** | 下沿恒定，模型不动，任何长度都没有多余空白 |
+
+所以 `_layout_children()` 里是：
+
+```python
+bubble_bottom = BUBBLE_TOP + BUBBLE_MAX_H          # 下沿钉死
+bubble_y = max(BUBBLE_TOP, bubble_bottom - self.bubble.height())
+self.bubble.move(x, bubble_y)
+```
+
+高度一变就要重新摆位，所以气泡加了 `height_changed` 信号，
+`_layout_children()` 里再用 `_laying_out` 标志防重入
+（`set_max_height()` → `apply_content_height()` → 可能发信号 → 又回调布局）。
+
+实测四种长度（`tools/test_bubble_align.py`）：
+
+| 消息 | 气泡高 | 气泡 y | 下沿 | 距模型 |
+| --- | --- | --- | --- | --- |
+| 短 | 72 | 162 | 234 | 13 |
+| 中 | 90 | 144 | 234 | 13 |
+| 长 | 188 | 46 | 234 | 13 |
+| 超长 | 188 | 46 | 234 | 13 |
+
+下沿波动 0px、间距波动 0px。超长时气泡顶部正好到 `BUBBLE_TOP = 46`，
+不会再往上盖住角标按钮。
+
+> 副作用：打字过程中每换一行，气泡会向上"顶"一行，正文整体上移。
+> 这是底部对齐的必然结果（等价于最后一行位置固定、旧行往上走）。
+> 换成顶部对齐就没有这个位移，但会退回"短消息下方一大片空白"。
+
 #### 五个必须处理的细节
 
 **1. QLabel 默认垂直居中，必须显式顶对齐。**
@@ -1620,6 +1658,7 @@ python tools/test_bubble_scroll.py
 | `tools/test_reconfigure_ui.py` | 「修改配置」按钮信号 + 远程服务运行中启停/换端口 |
 | `tools/test_reconfigure_e2e.py` | 真实 PetWindow 跑完整重配链路（快照并还原 .env） |
 | `tools/test_bubble_scroll.py` | 气泡长文本滚动 + `parse_emotion` 标签清理 + 自动隐藏取消 |
+| `tools/test_bubble_align.py` | 气泡下沿与模型始终对齐（真实 PetWindow，断言下沿/间距零漂移） |
 
 ### 6.2 本会话踩过的坑（按代价排序）
 

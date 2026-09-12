@@ -32,6 +32,8 @@ class SpeechBubble(QFrame):
     typewriter_finished = Signal()
     # 气泡显示/隐藏时发出，供外层重新排布角标按钮（避免遮挡、也避免留白）
     visibility_changed = Signal(bool)
+    # 气泡高度变化时发出，供外层重新对齐（气泡是底部对齐的，高度一变下沿会动）
+    height_changed = Signal(int)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -215,6 +217,8 @@ class SpeechBubble(QFrame):
         want = min(self._chrome_height() + needed + self._pad(), self._max_height)
         if want > 0 and self.height() != want:
             self.setFixedHeight(want)
+            # 气泡是底部对齐的，高度一变就要让外层重新摆位置
+            self.height_changed.emit(want)
 
     def _on_scrolled(self, value: int) -> None:
         """区分「用户滚动」和「我们自动跟随」。"""
