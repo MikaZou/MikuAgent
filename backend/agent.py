@@ -12,6 +12,14 @@ from memory import MemoryStore
 from persona import build_system_prompt
 
 EMOTION_TAG = re.compile(r"^\s*\[([A-Za-z_]+)\]\s*")
+# 正文中间也可能冒出标签（实测模型写过「…吗～？ [HAPPY] 当然可以呀！」）。
+# 只清「已知情感名」的方括号，避免误伤正文里像 [1] 这样的正常方括号。
+KNOWN_EMOTIONS = (
+    "HAPPY", "SAD", "ANGRY", "SURPRISED", "MOTIVATED", "EMPATHY", "NORMAL",
+)
+INLINE_EMOTION_TAG = re.compile(
+    r"\[\s*(" + "|".join(KNOWN_EMOTIONS) + r")\s*\]", re.IGNORECASE
+)
 
 WRITE_MEMORY_TOOL = {
     "type": "function",
@@ -88,13 +96,33 @@ ERROR_REPLIES = [
 
 
 def parse_emotion(text: str) -> tuple[str, str]:
-    """从回复中解析情感标签，返回 (情感, 去除标签后的正文)。"""
-    match = EMOTION_TAG.match(text or "")
+    """从回复中解析情感标签，返回 (情感, 去除标签后的正文)。
+
+    标签可能出现两次：开头（约定的格式）和正文中间（模型自由发挥）。
+    两处都必须清掉 —— 只处理开头的话，中间那个会原样显示在气泡里，
+    还会被 TTS 念出来（「左括号 HAPPY 右括号」）。
+    """
+    raw = text or ""
+
+    emotion = ""
+    match = EMOTION_TAG.match(raw)
     if match:
         emotion = match.group(1).upper()
-        clean = text[match.end():].strip()
-        return emotion, clean
-    return "NORMAL", (text or "").strip()
+        raw = raw[match.end():]
+
+    # 开头没有的话，就用正文里第一个标签当情感
+    if not emotion:
+        found = INLINE_EMOTION_TAG.search(raw)
+        if found:
+            emotion = found.group(1).upper()
+    # 无论开头有没有，正文里的都清掉
+    raw = INLINE_EMOTION_TAG.sub(" ", raw)
+
+    # 清理标签留下的多余空白（保留换行：气泡里分段是有意义的）
+    clean = re.sub(r"[ \t]{2,}", " ", raw)
+    clean = re.sub(r"[ \t]+\n", "\n", clean)
+    clean = re.sub(r"\n{3,}", "\n\n", clean)
+    return (emotion or "NORMAL"), clean.strip()
 
 
 class MikuAgent:

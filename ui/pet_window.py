@@ -779,9 +779,12 @@ class PetWindow(Live2DView):
 
     def _greet(self) -> None:
         self.set_emotion("HAPPY")
-        self.bubble.show_message(GREETING, "HAPPY")
+        # 用 autohide_ms 而不是另外排一个 singleShot(hide_bubble)：
+        # show_message 里的自动隐藏定时器会被新消息取消，而外部的
+        # singleShot 不会 —— 那样用户如果在开场 9 秒内说话，
+        # 回复刚显示出来就会被开场白的定时器隐藏掉。
+        self.bubble.show_message(GREETING, "HAPPY", autohide_ms=9000)
         self._layout_children()
-        QTimer.singleShot(9000, self.bubble.hide_bubble)
 
     def quit_app(self) -> None:
         self.stop_speaking()

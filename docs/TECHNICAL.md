@@ -1486,6 +1486,79 @@ python tools/test_reconfigure_e2e.py  # 真实 PetWindow 跑完整链路（会�
 
 ---
 
+### 5.8 气泡长文本可滚动（**已完成**）
+
+气泡高度上限是 `BUBBLE_MAX_H = 132`（`ui/pet_window.py`），这个值同时决定
+模型避让的安全区（`BUBBLE_TOP + BUBBLE_MAX_H`），不能随便加大。
+但长回复超过 132px 之前是**直接被裁掉**的 —— 末尾几个字永远看不到。
+
+改法：把内容 `QLabel` 放进 `QScrollArea`，超出部分可以上下滑动查看。
+
+```
+气泡（≤132px）
+ └ QVBoxLayout
+    ├ 情绪 chip
+    └ QScrollArea（滚动条按需出现）
+       └ QLabel（wordWrap，顶对齐）
+```
+
+#### 三个必须处理的细节
+
+**1. QLabel 默认垂直居中，必须显式顶对齐。**
+滚动区会把 QLabel 拉得比内容高，居中的结果是整段文字被顶到可视区下半部分、
+上方留一大片空白（实测复现过）。要用
+`setAlignment(AlignLeft | AlignTop)` 并给纵向 `SizePolicy.Minimum`。
+
+**2. 不能用 `QLabel.heightForWidth()` 算高度 —— 它会明显高估。**
+实测 320px 宽、真实 4 行的文本，`heightForWidth` 给出 216px，实际只要约 84px，
+结果是往下滚能看到一大片空白。改用 `QFontMetrics.boundingRect` 按实际宽度
+和换行规则算，与 QLabel 的渲染口径一致：
+
+```python
+fm = self._content.fontMetrics()
+rect = fm.boundingRect(QRect(0, 0, width, 100000), Qt.TextFlag.TextWordWrap, text)
+height = max(rect.height(), fm.height()) + fm.lineSpacing() // 3
+```
+
+**3. 自动跟随要能被用户打断。**
+打字过程中跟随底部（看得到字在冒），但分两种「滚动」：程序滚动要吞掉
+`valueChanged`（否则会被当成用户操作），用户滚动才更新 `_follow`。
+打完字后如果内容超框，**回到顶部**——停在底部会让人以为「就这么几句」。
+用户中途自己滚过就不动他。
+
+> 用 `QAbstractSlider.actionTriggered` 区分也可以，但它触发时 value 还没更新，
+> 判断时机不对；用 `_auto_scrolling` 标志位更稳。
+
+#### 顺带修掉：开场白定时器吞掉回复
+
+`_greet` 原先用 `QTimer.singleShot(9000, self.bubble.hide_bubble)` 排了一个
+**外部**定时器。`show_message()` 只会停掉自己内部的 `_autohide`，停不掉外部
+那个 —— 用户如果在开场 9 秒内说话，回复刚显示出来就被隐藏了。
+改成 `show_message(GREETING, "HAPPY", autohide_ms=9000)`，新消息会自动取消它。
+
+#### 顺带修掉：`[HAPPY]` 标签漏进正文
+
+截图里出现过 `…吗～？ [HAPPY] 当然可以呀！` —— 标签既显示在气泡里，也会被
+TTS 念成「左括号 HAPPY 右括号」。
+
+根因：`agent.EMOTION_TAG` 是 `^\s*\[([A-Za-z_]+)\]\s*`，**只匹配开头**。
+模型把标签写在了第二段就匹配不到。
+
+修法：保留原有的「开头标签」逻辑，另外用只含已知情感名的
+`INLINE_EMOTION_TAG` 把正文里的标签也清掉。**只清已知情感名**，
+避免误伤正文里像 `[1]` 这样的正常方括号。
+
+#### 复测
+
+```bash
+python tools/test_bubble_scroll.py
+# 测试 1：parse_emotion 六种情况（含 [1] 不被误删、小写 [happy]）
+# 测试 2：长文本可滚动 / 短文本不出现滚动条
+# 测试 3：新消息取消上一条的自动隐藏
+```
+
+---
+
 ## 6. 附录
 
 ### 6.1 工具清单
@@ -1508,6 +1581,7 @@ python tools/test_reconfigure_e2e.py  # 真实 PetWindow 跑完整链路（会�
 | `tools/test_engine_switch.py` | 引擎切换 + 资源释放 + 预热野进程回归（见 5.7） |
 | `tools/test_reconfigure_ui.py` | 「修改配置」按钮信号 + 远程服务运行中启停/换端口 |
 | `tools/test_reconfigure_e2e.py` | 真实 PetWindow 跑完整重配链路（快照并还原 .env） |
+| `tools/test_bubble_scroll.py` | 气泡长文本滚动 + `parse_emotion` 标签清理 + 自动隐藏取消 |
 
 ### 6.2 本会话踩过的坑（按代价排序）
 

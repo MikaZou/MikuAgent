@@ -1,9 +1,17 @@
 """头顶气泡：情感标签 + 打字机效果（对齐旧版 app.js 的 showBubble / typeInBubble）。"""
 from __future__ import annotations
 
-from PySide6.QtCore import QPointF, Qt, QTimer, Signal
+from PySide6.QtCore import QPointF, QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPolygonF
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QScrollArea,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
 
 EMOTION_LABELS = {
     "HAPPY": "开心", "SAD": "难过", "ANGRY": "生气", "SURPRISED": "惊讶",
@@ -55,15 +63,60 @@ class SpeechBubble(QFrame):
                 letter-spacing: 3px;
                 background: transparent;
             }
+            /* 内容区可滚动：长回复超出气泡高度时，用户可以上下滑动看全文 */
+            #bubbleScroll, #bubbleScroll > QWidget > QWidget {
+                background: transparent;
+                border: none;
+            }
+            QScrollBar:vertical {
+                background: transparent;
+                width: 6px;
+                margin: 0px;
+            }
+            QScrollBar::handle:vertical {
+                background: rgba(57, 197, 187, 0.45);
+                border-radius: 3px;
+                min-height: 18px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: rgba(57, 197, 187, 0.75);
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                background: transparent;
+            }
             """
         )
 
         self._chip = QLabel(self)
         self._chip.setObjectName("emotionChip")
-        self._content = QLabel(self)
+        self._content = QLabel()
         self._content.setObjectName("bubbleContent")
         self._content.setWordWrap(True)
         self._content.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
+        # 必须显式顶对齐：QLabel 默认垂直居中，而在滚动区里它会被拉得比内容高，
+        # 结果整段文字被顶到可视区下半部分，上面留一大片空白（实测过）。
+        self._content.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+        )
+        # 纵向 Minimum：让它贴合内容高度，不要被滚动区拉伸
+        self._content.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum
+        )
+
+        # 内容用滚动区包起来：长回复超出气泡最大高度时可以上下滑动看完，
+        # 而不是被硬裁掉（之前就是直接裁，末尾几个字永远看不到）。
+        self._scroll = QScrollArea(self)
+        self._scroll.setObjectName("bubbleScroll")
+        self._scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setWidget(self._content)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._scroll.viewport().setAutoFillBackground(False)
+        self._scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
@@ -75,7 +128,7 @@ class SpeechBubble(QFrame):
         body.setContentsMargins(14, 10, 14, 10 + ARROW_H)
         body.setSpacing(4)
         body.addLayout(header)
-        body.addWidget(self._content)
+        body.addWidget(self._scroll, 1)
 
         # 宽度由 PetWindow._layout_children 统一设定；这里只兜底一个最小宽度，
         # 不再设 maximumWidth —— 否则短句气泡会被压得很小。
@@ -91,7 +144,68 @@ class SpeechBubble(QFrame):
         self._autohide.setSingleShot(True)
         self._autohide.timeout.connect(self.hide_bubble)
 
+        # 自动跟随到底部；用户一旦自己往上滚，就停在他看的位置不要拽回来
+        self._follow = True
+        self._auto_scrolling = False
+        self._scroll.verticalScrollBar().valueChanged.connect(self._on_scrolled)
+
         self.hide()
+
+    # ------------------------------------------------------------- 滚动
+    @property
+    def _bar(self):
+        return self._scroll.verticalScrollBar()
+
+    def _sync_content_height(self) -> None:
+        """按当前 viewport 宽度精确算出内容需要多高。
+
+        不用 QLabel.heightForWidth()：实测它会明显**高估**（320px 宽、
+        实际 4 行的文本算成 216px，真实只要约 84px），结果是往下滚
+        能看到一大片空白。改用 QFontMetrics.boundingRect 按实际宽度
+        和换行规则算，和 QLabel 的渲染口径一致。
+        """
+        width = self._scroll.viewport().width()
+        text = self._content.text()
+        if width <= 0 or not text:
+            return
+        fm = self._content.fontMetrics()
+        rect = fm.boundingRect(
+            QRect(0, 0, width, 100000),
+            int(Qt.TextFlag.TextWordWrap),
+            text,
+        )
+        # 留一点点余量，避免最后一行被裁掉（宁可多几像素空白）
+        height = max(rect.height(), fm.height()) + fm.lineSpacing() // 3
+        if height != self._content.minimumHeight():
+            self._content.setMinimumHeight(height)
+
+    def _on_scrolled(self, value: int) -> None:
+        """区分「用户滚动」和「我们自动跟随」。"""
+        if self._auto_scrolling:
+            return
+        self._follow = value >= self._bar.maximum() - 4
+
+    def _scroll_to_bottom(self) -> None:
+        self._auto_scrolling = True
+        self._bar.setValue(self._bar.maximum())
+        self._auto_scrolling = False
+
+    def _after_content_change(self) -> None:
+        """内容变了：重算高度，需要的话跟到底部。
+
+        高度要等布局跑完才算得准，所以延到下一轮事件循环。
+        """
+        QTimer.singleShot(0, self._sync_content_height)
+        if self._follow:
+            QTimer.singleShot(0, self._scroll_to_bottom)
+
+    def scroll_to_top(self) -> None:
+        self._follow = False
+        self._bar.setValue(0)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._sync_content_height()
 
     # ------------------------------------------------------------- 绘制小三角
     def showEvent(self, event) -> None:  # noqa: N802
@@ -130,6 +244,9 @@ class SpeechBubble(QFrame):
         self._content.setText("● ● ●")
         self._full_text = ""
         self.adjustSize()
+        self.scroll_to_top()
+        self._follow = True
+        self._after_content_change()
         self.show()
         self.raise_()
         if autohide_ms:
@@ -160,24 +277,42 @@ class SpeechBubble(QFrame):
             self.adjustSize()
             self.show()
             self.raise_()
+            self.scroll_to_top()
+            self._follow = True
             self._timer.start()
         else:
             self._content.setText(self._full_text)
             self.adjustSize()
             self.show()
             self.raise_()
+            self.scroll_to_top()
+            self._follow = False   # 整段直接显示时不自动滚，让用户从头读
+            self._after_content_change()
             self.typewriter_finished.emit()
             if autohide_ms:
                 self._autohide.start(autohide_ms)
+
+    def _snap_top_if_overflow(self) -> None:
+        """打完字后如果内容超框，回到顶部。
+
+        打字过程中是跟随底部的（这样能看到字在往上冒），但回复完整之后
+        应该从第一句开始读 —— 停在底部会让用户以为「只有这几句」。
+        用户中途自己滚过（_follow 已为 False）就不动他。
+        """
+        self._sync_content_height()
+        if self._follow and self._bar.maximum() > 0:
+            self.scroll_to_top()
 
     def _tick(self) -> None:
         if self._shown >= len(self._full_text):
             self._timer.stop()
             self.typewriter_finished.emit()
+            QTimer.singleShot(0, self._snap_top_if_overflow)
             return
         self._shown += 1
         self._content.setText(self._full_text[: self._shown])
         self.adjustSize()
+        self._after_content_change()
 
     def hide_bubble(self) -> None:
         self._timer.stop()
@@ -195,4 +330,6 @@ class SpeechBubble(QFrame):
             self._shown = len(self._full_text)
             self._content.setText(self._full_text)
             self.adjustSize()
+            self._after_content_change()
+            QTimer.singleShot(0, self._snap_top_if_overflow)
             self.typewriter_finished.emit()
