@@ -139,6 +139,71 @@ MINIMAX_EMOTION = {
 # 没配克隆音色时的兜底系统音色（少女音）
 MINIMAX_FALLBACK_VOICE = "female-shaonv"
 
+# MiniMax 各 emotion 的实际语速倍率（实测标定，去静音后以 neutral = 1.0）。
+# 同一个 speed 参数下 surprised/happy 比 neutral 快 23~29%、angry 快约 17%，
+# sad 略慢，表现为「有时快有时慢」。开启 MINIMAX_SPEED_NORMALIZE 时按此反向补偿。
+# 复测：tools/measure_emotion_speed.py
+MINIMAX_EMOTION_RATE = {
+    "neutral": 1.000,
+    "sad": 0.929,
+    "angry": 1.174,
+    "happy": 1.233,
+    "surprised": 1.286,
+}
+# speed 与最终语速不是线性关系，实测 语速 ∝ speed^1.19
+# （angry: 1.25→3.99、1.8→6.15 字/秒；neutral: 1.0→2.60、1.8→5.24）。
+# 所以补偿要用 (比值)^(1/指数)，直接用 1/比值 会补偿过头。
+MINIMAX_SPEED_EXPONENT = 1.19
+# MiniMax voice_setting.speed 的合法区间
+MINIMAX_SPEED_RANGE = (0.5, 2.0)
+
+# 情绪 → 期望的相对语速（1.00 = NORMAL 基准）。
+# 这不是"消除情绪差异"，而是把差异做成有意设计、幅度可控的：
+# 兴奋/急切略快，低落/共情略慢，且幅度控制在 ±12% 以内，
+# 免得又是"有时快有时慢"。改这张表即可调音色性格。
+EMOTION_SPEED_TARGET = {
+    "NORMAL": 1.00,
+    "HAPPY": 1.08,
+    "SAD": 0.90,
+    "ANGRY": 1.12,
+    "SURPRISED": 1.06,
+    "MOTIVATED": 1.10,
+    "EMPATHY": 0.94,
+}
+
+# 句式/标点对语速的微调（"合适说话"）：让念白贴合句子本身的语气。
+# 幅度都压得很小，避免听感上忽快忽慢。
+CONTENT_SPEED_BIAS = {
+    "exclaim": 1.04,   # ！ 语气上扬，略快
+    "question": 1.03,  # ？ 疑问，略快
+    "ellipsis": 0.94,  # …… 迟疑/留白，放慢
+    "long": 0.95,      # 长句放慢一点，便于听清
+    "long_chars": 30,  # 触发长句放慢的字数
+}
+
+
+def content_speed_bias(text: str) -> tuple[float, list[str]]:
+    """按句式/标点微调语速，返回 (倍率, 触发原因列表)。
+
+    大模型回复里既有感叹也有迟疑的省略号，念白跟着句子走会更自然：
+    「！」「？」略快，「……」「长句」略慢。幅度都只有几个百分点。
+    """
+    bias = 1.0
+    reasons: list[str] = []
+    if re.search(r"[！!]", text):
+        bias *= CONTENT_SPEED_BIAS["exclaim"]
+        reasons.append("感叹")
+    if re.search(r"[？?]", text):
+        bias *= CONTENT_SPEED_BIAS["question"]
+        reasons.append("疑问")
+    if "…" in text or "..." in text:
+        bias *= CONTENT_SPEED_BIAS["ellipsis"]
+        reasons.append("省略")
+    if len(text) >= CONTENT_SPEED_BIAS["long_chars"]:
+        bias *= CONTENT_SPEED_BIAS["long"]
+        reasons.append("长句")
+    return bias, reasons
+
 
 class TextToSpeech:
     """把文本合成为 WAV 文件。线程安全。"""
@@ -338,7 +403,9 @@ class TextToSpeech:
                 elif self.engine == "sovits":
                     path = self._synth_sovits(clean, emotion, cached)
                 elif self.engine == "minimax":
-                    path = self._synth_minimax(clean, emotion, cached)
+                    # bias_source 传原始文本：normalize_text 会把「……」换成「，」，
+                    # 用归一化后的文本判断句式的话，省略号规则永远不会命中。
+                    path = self._synth_minimax(clean, emotion, cached, bias_source=text)
                 else:
                     return None
             except Exception as exc:  # noqa: BLE001
@@ -404,10 +471,22 @@ class TextToSpeech:
                 stamp = "missing"
             parts += [str(ref), stamp, config.TTS_PROMPT_TEXT or ""]
         elif self.engine == "minimax":
+            # 标定表/期望曲线变了也要让缓存失效，否则重标后仍播出旧语速的音频
+            cal = hashlib.sha1(
+                (
+                    repr(sorted(MINIMAX_EMOTION_RATE.items()))
+                    + repr(sorted(EMOTION_SPEED_TARGET.items()))
+                    + repr(sorted(CONTENT_SPEED_BIAS.items()))
+                    + f"|exp={MINIMAX_SPEED_EXPONENT}"
+                ).encode("utf-8")
+            ).hexdigest()[:8]
             parts += [
                 getattr(config, "MINIMAX_VOICE_ID", "") or "",
                 getattr(config, "MINIMAX_TTS_MODEL", "") or "",
                 str(getattr(config, "MINIMAX_SPEED", "")),
+                "norm=%d" % int(bool(getattr(config, "MINIMAX_SPEED_NORMALIZE", True))),
+                "cbi=%d" % int(bool(getattr(config, "MINIMAX_CONTENT_BIAS", True))),
+                f"cal={cal}",
             ]
         return "|".join(parts)
 
@@ -526,7 +605,98 @@ class TextToSpeech:
         return path
 
     # --------------------------------------------------------------- minimax
-    def _synth_minimax(self, text: str, emotion: str, out_wav: Path) -> Optional[Path]:
+    @staticmethod
+    def _minimax_speed(mm_emotion: str, text: str = "", emotion_label: str = "") -> float:
+        """反解出应当下发的 voice_setting.speed。
+
+        模型：最终语速 ∝ speed^1.19 × MiniMax 自身的情绪倍率。
+        期望：最终语速 = 基准 × EMOTION_SPEED_TARGET[情绪] × 句式微调，
+        于是 speed = 基准 × (期望倍率 / MiniMax情绪倍率)^(1/1.19)。
+
+        MiniMax 的 emotion 不只是音色，会连带改变真实语速（surprised 比
+        neutral 快约 29%）。直接把 speed 设成基准值会得到「有时快有时慢」；
+        按 1/倍率 补偿又会过头（实测把 angry 压到比 neutral 还慢）。
+        所以这里用实测指数反解，让情绪差异变成有意设计的幅度。
+
+        MINIMAX_SPEED_NORMALIZE=false 时不做反解，完全用原始 speed。
+        """
+        speed = config.MINIMAX_SPEED
+        if getattr(config, "MINIMAX_SPEED_NORMALIZE", True):
+            intended = EMOTION_SPEED_TARGET.get((emotion_label or "").upper(), 1.0)
+            if text and getattr(config, "MINIMAX_CONTENT_BIAS", True):
+                intended *= content_speed_bias(text)[0]
+            mm_rate = MINIMAX_EMOTION_RATE.get(mm_emotion, 1.0)
+            if mm_rate > 0 and intended > 0:
+                speed *= (intended / mm_rate) ** (1.0 / MINIMAX_SPEED_EXPONENT)
+        lo, hi = MINIMAX_SPEED_RANGE
+        return round(max(lo, min(hi, speed)), 2)
+
+    def _minimax_post(self, payload: dict) -> dict:
+        """POST /v1/t2a_v2，对限流与瞬时故障做指数退避重试。
+
+        之前限流被当成硬失败：MiniMax 在并发稍高时返回 HTTP 200 但
+        base_resp.status_code=1002（rate limit exceeded/RPM），结果这一句
+        直接没有声音。实测跑 20 次采样就会撞上，正常对话里也会偶发。
+        """
+        import time as _time
+
+        import requests
+
+        retryable = {1002, 1039, 1042}  # 限流/服务繁忙
+        attempts = max(1, config.MINIMAX_RETRIES)
+        last = "未知错误"
+        for attempt in range(attempts):
+            exc_hint = ""
+            try:
+                resp = requests.post(
+                    f"{config.MINIMAX_BASE_URL}/v1/t2a_v2",
+                    headers={
+                        "Authorization": f"Bearer {config.MINIMAX_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                    timeout=config.MINIMAX_TIMEOUT,
+                )
+            except Exception as exc:  # noqa: BLE001
+                last = f"请求异常：{exc}"
+            else:
+                try:
+                    data = resp.json()
+                except Exception as exc:  # noqa: BLE001
+                    last = f"返回非 JSON（HTTP {resp.status_code}）：{exc}"
+                    data = None
+                if data is not None:
+                    base = data.get("base_resp") or {}
+                    code = base.get("status_code")
+                    if resp.status_code == 200 and code in (0, None):
+                        return data
+                    hint = ""
+                    if code == 1004:
+                        hint = "（鉴权失败，检查 MINIMAX_API_KEY）"
+                    elif code == 1008:
+                        hint = "（余额不足）"
+                    elif code == 2056:
+                        hint = "（音色不存在或已过期，克隆音色 7 天未使用会被删除，需重新克隆）"
+                    last = (
+                        f"HTTP {resp.status_code} code={code} "
+                        f"{base.get('status_msg')}{hint}"
+                    )
+                    # 鉴权/余额/音色这类硬错误重试也没用，直接失败
+                    if code not in retryable and (code is not None or resp.status_code < 500):
+                        raise RuntimeError(f"MiniMax 合成失败 {last}")
+            if attempt < attempts - 1:
+                delay = min(8.0, 1.5 * (2**attempt))
+                print(f"[TTS] MiniMax 重试 {attempt + 2}/{attempts}（{last}），{delay:.1f}s 后")
+                _time.sleep(delay)
+        raise RuntimeError(f"MiniMax 合成失败（已重试 {attempts} 次）{last}")
+
+    def _synth_minimax(
+        self,
+        text: str,
+        emotion: str,
+        out_wav: Path,
+        bias_source: str = "",
+    ) -> Optional[Path]:
         """MiniMax 云端合成（初音克隆音色）。
 
         相比本地 GPT-SoVITS：省掉约 1.4~2.2GB 显存 + 2.9GB 内存，
@@ -534,12 +704,12 @@ class TextToSpeech:
 
         官方规格见 https://platform.minimaxi.com/docs/api-reference/speech-t2a-http
         """
-        import requests
-
         if not config.HAS_MINIMAX_KEY:
             raise RuntimeError("未配置 MINIMAX_API_KEY（TTS_ENGINE=minimax 时必填）")
 
         voice_id = config.MINIMAX_VOICE_ID or MINIMAX_FALLBACK_VOICE
+        mm_emotion = MINIMAX_EMOTION.get((emotion or "NORMAL").upper(), "neutral")
+        speed = self._minimax_speed(mm_emotion, bias_source or text, emotion)
         payload = {
             "model": config.MINIMAX_TTS_MODEL,
             "text": text,
@@ -548,10 +718,11 @@ class TextToSpeech:
                 "voice_id": voice_id,
                 # 克隆自 v4c 发布会致辞，那段本身语速偏慢；
                 # 实测 speed=1.0 只有 2.2 字/秒，1.8 才接近自然的 3.7 字/秒。
-                "speed": config.MINIMAX_SPEED,
+                # 再按情绪补偿，见 _minimax_speed。
+                "speed": speed,
                 "vol": 1.0,
                 "pitch": 0,
-                "emotion": MINIMAX_EMOTION.get((emotion or "NORMAL").upper(), "neutral"),
+                "emotion": mm_emotion,
             },
             "audio_setting": {
                 "sample_rate": 32000,
@@ -561,34 +732,7 @@ class TextToSpeech:
             },
         }
 
-        resp = requests.post(
-            f"{config.MINIMAX_BASE_URL}/v1/t2a_v2",
-            headers={
-                "Authorization": f"Bearer {config.MINIMAX_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
-            timeout=config.MINIMAX_TIMEOUT,
-        )
-        try:
-            data = resp.json()
-        except Exception as exc:  # noqa: BLE001
-            raise RuntimeError(f"MiniMax 返回非 JSON（HTTP {resp.status_code}）：{exc}") from exc
-
-        base = data.get("base_resp") or {}
-        code = base.get("status_code")
-        if resp.status_code != 200 or code not in (0, None):
-            hint = ""
-            if code == 1004:
-                hint = "（鉴权失败，检查 MINIMAX_API_KEY）"
-            elif code == 1008:
-                hint = "（余额不足）"
-            elif code == 2056:
-                hint = "（音色不存在或已过期，克隆音色 7 天未使用会被删除，需重新克隆）"
-            raise RuntimeError(
-                f"MiniMax 合成失败 HTTP {resp.status_code} "
-                f"code={code} {base.get('status_msg')}{hint}"
-            )
+        data = self._minimax_post(payload)
 
         audio_hex = (data.get("data") or {}).get("audio") or ""
         if not audio_hex:

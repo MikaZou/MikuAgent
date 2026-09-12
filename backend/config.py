@@ -8,8 +8,12 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
 
-def _flag(name: str) -> bool:
-    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+def _flag(name: str, default: bool = False) -> bool:
+    """读取布尔开关：1/true/yes/on 为真；未设置时返回 default。"""
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on"}
 
 
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "").strip()
@@ -37,7 +41,15 @@ MINIMAX_ASR_MODEL = os.getenv("MINIMAX_ASR_MODEL", "asr-1.0").strip()
 #   实测 speed=1.0 → 2.2 字/秒（明显偏慢）；1.8 → 3.7 字/秒（接近自然）
 #   本地 GPT-SoVITS 同文本约 4.6 字/秒。可用 tools/minimax_speed_test.py 复测。
 MINIMAX_SPEED = float(os.getenv("MINIMAX_SPEED", "1.8"))
+# MiniMax 会按 emotion 改变实际说话快慢：同一个 speed，angry 比 neutral 快 44%，
+# happy/surprised 快约 21%。这就是"有时快有时慢"的来源。
+# 开启后按情绪反向补偿 speed，把最终语速拉回一致（用 tools/measure_emotion_speed.py 实测标定）。
+MINIMAX_SPEED_NORMALIZE = _flag("MINIMAX_SPEED_NORMALIZE", True)
+# 是否按句式/标点微调语速（！？ 略快、…… 与长句略慢）
+MINIMAX_CONTENT_BIAS = _flag("MINIMAX_CONTENT_BIAS", True)
 MINIMAX_TIMEOUT = int(os.getenv("MINIMAX_TIMEOUT", "120"))
+# 限流（base_resp 1002 rate limit exceeded/RPM）与瞬时故障的重试次数
+MINIMAX_RETRIES = int(os.getenv("MINIMAX_RETRIES", "3"))
 HAS_MINIMAX_KEY = bool(MINIMAX_API_KEY) and not MINIMAX_API_KEY.startswith("sk-xxx")
 
 MAX_HISTORY_MESSAGES = int(os.getenv("MAX_HISTORY_MESSAGES", "20"))
