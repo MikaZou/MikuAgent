@@ -93,12 +93,28 @@ class SetupWizard(QDialog):
         title.setObjectName("h1")
         root.addWidget(title)
         sub = QLabel(
-            "第一次运行需要选一下「语音怎么走」。选错了也没关系，"
+            "第一次运行需要填一下密钥、选一下「语音怎么走」。选错了也没关系，"
             "随时可以改 .env 或在设置面板里调整。"
         )
         sub.setObjectName("tip")
         sub.setWordWrap(True)
         root.addWidget(sub)
+
+        # ---------------- 必填：DeepSeek ----------------
+        root.addWidget(self._heading("DeepSeek 大脑（必填）"))
+        ds_row = QHBoxLayout()
+        ds_row.addWidget(QLabel("API Key"))
+        self.ds_key = QLineEdit(cur.get("DEEPSEEK_API_KEY", ""))
+        self.ds_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.ds_key.setPlaceholderText("sk-…（在 platform.deepseek.com 申请）")
+        ds_row.addWidget(self.ds_key, 1)
+        root.addLayout(ds_row)
+        ds_tip = QLabel(
+            "不填也能启动，但 Miku 只会用本地预设回复（离线演示模式），不会真的对话。"
+        )
+        ds_tip.setObjectName("tip")
+        ds_tip.setWordWrap(True)
+        root.addWidget(ds_tip)
 
         # ---------------- 称呼 ----------------
         nick_row = QHBoxLayout()
@@ -138,6 +154,19 @@ class SetupWizard(QDialog):
         vtip.setObjectName("tip")
         vtip.setWordWrap(True)
         root.addWidget(vtip)
+
+        # ---------------- 手机端 ----------------
+        self.remote = QCheckBox("开启手机端（同一 WiFi 下用手机浏览器访问）")
+        self.remote.setChecked(cur.get("REMOTE_ENABLED", "false").lower() in ("1", "true", "yes", "on"))
+        root.addWidget(self.remote)
+        rtip = QLabel(
+            "⚠️ 会在本机开一个监听所有网卡的端口，且**没有密码** —— "
+            "同一局域网内的设备都能连上来对话，会消耗你的 API 额度。"
+            "只在你自己的网络里开。"
+        )
+        rtip.setObjectName("cost")
+        rtip.setWordWrap(True)
+        root.addWidget(rtip)
 
         # ---------------- 按钮 ----------------
         btn_row = QHBoxLayout()
@@ -187,16 +216,19 @@ class SetupWizard(QDialog):
     # ------------------------------------------------------------ 提交
     def choices(self) -> dict:
         return {
+            "DEEPSEEK_API_KEY": self.ds_key.text().strip(),
             "TTS_ENGINE": self._selected(self.tts_group),
             "STT_TRANSCRIBER": self._selected(self.stt_group),
             "MINIMAX_API_KEY": self.api_key.text().strip(),
             "VISION_ENABLED": "true" if self.video.isChecked() else "false",
+            "REMOTE_ENABLED": "true" if self.remote.isChecked() else "false",
         }
 
     def apply(self) -> list[str]:
         """把选择写进 .env，返回被修改的 key。"""
         values = self.choices()
-        # 空 Key 不要覆盖掉已有的
-        if not values["MINIMAX_API_KEY"]:
-            values.pop("MINIMAX_API_KEY")
+        # 空 Key 不要覆盖掉已有的（用户可能只是没改这一栏）
+        for k in ("DEEPSEEK_API_KEY", "MINIMAX_API_KEY"):
+            if not values.get(k):
+                values.pop(k)
         return envfile.update_env(values)

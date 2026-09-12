@@ -47,7 +47,12 @@ MOCK_MODE = _flag("MOCK_MODE")
 # 在 PC 端桌宠进程里额外起一个 HTTP + WebSocket 服务，
 # 手机浏览器访问 http://<PC的局域网IP>:<端口>/ 即可使用。
 # 关掉它不影响桌宠本身。
-REMOTE_ENABLED = _flag("REMOTE_ENABLED") if os.getenv("REMOTE_ENABLED") else True
+#
+# ⚠️ 安全默认值：**默认关闭**。
+# 该服务监听 0.0.0.0 且没有鉴权（同一局域网内任何设备都能连上来对话，
+# 会消耗你自己的 DeepSeek / MiniMax 额度），所以必须由用户显式开启。
+# 首次设置向导里有这一项；也可在这里或 .env 里打开。
+REMOTE_ENABLED = _flag("REMOTE_ENABLED")
 REMOTE_PORT = int(os.getenv("REMOTE_PORT", "8765"))
 # 手机端要加载的 JS 库来源（PIXI.js / pixi-live2d-display）。
 # 网络受限时换成可用镜像，例如 https://fastly.jsdelivr.net/npm

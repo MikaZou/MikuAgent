@@ -92,6 +92,10 @@ class PetWindow(Live2DView):
         # 初音模型顶部的实测位置（逻辑像素）；用来把角标按钮贴到她头顶上方
         self._model_top: Optional[int] = None
 
+        # 远程服务（手机端）就绪后的地址，供气泡提示与设置面板显示
+        self._remote_urls: list = []
+        self._remote_info: dict = {}
+
         # 视频对话（视觉）
         self._video_enabled = SettingsDialog.video_enabled()
         # 已经配好、等着跟下一条消息一起发出去的画面（JPEG 字节，仅内存）
@@ -350,6 +354,36 @@ class PetWindow(Live2DView):
         self.input_bar.set_mic_visible(enabled)
         if not enabled and self._recording:
             self.cancel_voice_input()
+
+    # ---------------------------------------------------------------- 远程服务
+    def on_remote_ready(self, urls: list, info: dict) -> None:
+        """远程服务就绪。
+
+        由 main.py 用 Qt signal 从服务线程排队到这里，所以这里是主线程。
+
+        `start.bat` 用的是 ``pythonw.exe``（无控制台），
+        `print` 出来的地址用户根本看不到 —— 必须显式告诉他，
+        否则「手机端」这个功能等于藏起来了。
+        """
+        self._remote_urls = list(urls or [])
+        self._remote_info = dict(info or {})
+        if not self._remote_urls:
+            return
+        print(f"[UI] 手机端可用：{'  '.join(self._remote_urls)}")
+        # 必须晚于开场问候的隐藏定时器（_greet 里 9 秒后 hide_bubble），
+        # 否则刚弹出来就被它顶掉。
+        QTimer.singleShot(12000, self._announce_remote)
+
+    def _announce_remote(self) -> None:
+        if not self._remote_urls:
+            return
+        url = self._remote_urls[0]
+        self.bubble.show_message(
+            f"主人～手机连同一个 WiFi，打开 {url} 就能找到我啦♪",
+            "HAPPY",
+            12000,
+        )
+        self._layout_children()
 
     # -------------------------------------------------------------- 视频对话
     def set_video_enabled(self, enabled: bool) -> None:

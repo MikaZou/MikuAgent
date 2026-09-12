@@ -99,9 +99,28 @@ def main() -> int:
     # 起不来只打日志，绝不影响桌宠本身
     remote = None
     try:
+        from PySide6.QtCore import QObject, Signal
+
         from remote_server import RemoteServer
 
-        remote = RemoteServer(agent, tts, stt, memory)
+        class _RemoteBridge(QObject):
+            """把服务线程的「就绪」事件排队回主线程。
+
+            服务跑在独立线程，直接碰 Qt 控件不安全；signal/slot 会走
+            queued connection，自动切回 GUI 线程。
+            """
+
+            ready = Signal(list, dict)
+
+        bridge = _RemoteBridge()
+        bridge.ready.connect(window.on_remote_ready)
+        # 必须留引用，否则 QObject 被回收、信号断掉
+        window._remote_bridge = bridge
+
+        remote = RemoteServer(
+            agent, tts, stt, memory,
+            on_ready=lambda urls, info: bridge.ready.emit(urls, info),
+        )
         remote.start()
     except Exception as exc:  # noqa: BLE001
         print(f"[Remote] 启动失败（不影响桌宠）：{exc}")

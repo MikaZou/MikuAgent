@@ -84,16 +84,35 @@ class RemoteServer:
     在独立线程里跑自己的 asyncio 事件循环，与 Qt 主线程互不干扰。
     """
 
-    def __init__(self, agent, tts, stt, memory) -> None:
+    def __init__(self, agent, tts, stt, memory, on_ready=None) -> None:
         self.agent = agent
         self.tts = tts
         self.stt = stt
         self.memory = memory
         self.port = config.REMOTE_PORT
+        # 服务就绪后回调（在服务线程里调用，UI 侧需自行切回主线程）
+        self.on_ready = on_ready
+        self.urls: list[str] = []
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._runner: Optional[web.AppRunner] = None
         self._clients = 0
+        self._log_path = Path(config.DATA_DIR) / "remote.log"
+
+    def _write_log(self, msg: str) -> None:
+        """写日志文件。
+
+        为什么需要：``start.bat`` 用的是 ``pythonw.exe``（无控制台），
+        ``print`` 出来的东西用户完全看不到，包括「手机该打开哪个地址」。
+        所以关键信息必须落文件 + 走回调给 UI。
+        """
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            self._log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._log_path.open("a", encoding="utf-8") as fh:
+                fh.write(f"{timestamp}  {msg}\n")
+        except Exception:  # noqa: BLE001
+            pass
 
     # ------------------------------------------------------------------ 路由
     def _make_app(self) -> web.Application:
@@ -281,11 +300,22 @@ class RemoteServer:
             _log(f"端口 {self.port} 起不来（可能被占用）：{exc}")
             return
         ips = _local_ips()
+        self.urls = [f"http://{ip}:{self.port}/" for ip in ips]
         _log(f"已启动，监听 0.0.0.0:{self.port}")
-        for ip in ips:
-            _log(f"  手机浏览器打开： http://{ip}:{self.port}/")
-        if not ips:
+        self._write_log(f"远程服务已启动，监听 0.0.0.0:{self.port}")
+        for url in self.urls:
+            _log(f"  手机浏览器打开： {url}")
+            self._write_log(f"  手机浏览器打开： {url}")
+        if not self.urls:
             _log("  （没探测到局域网 IP，请用 ipconfig 查看）")
+            self._write_log("  （没探测到局域网 IP，请用 ipconfig 查看）")
+
+        # 通知 UI（服务线程里回调，UI 侧负责切回主线程）
+        if self.on_ready is not None:
+            try:
+                self.on_ready(self.urls, self.provider_info())
+            except Exception as exc:  # noqa: BLE001
+                _log(f"on_ready 回调失败：{exc}")
 
         # 必须在这里挂住：asyncio.run() 会在协程返回后立刻关闭事件循环，
         # 那样服务刚 start() 就被拆掉了（表现为日志说已启动、实际连不上）。
