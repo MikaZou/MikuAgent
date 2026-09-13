@@ -14,6 +14,20 @@ BASE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(BASE_DIR))
 sys.path.insert(0, str(BASE_DIR / "backend"))
 
+# stdout 改成行缓冲。
+#
+# 为什么需要：`start.bat` 用 pythonw.exe（无控制台），一旦把 stdout 重定向到
+# 文件，Python 就切成**块缓冲**（8KB）—— 于是 `[STT] 转写通道已切换：…`、
+# `[Setup] 设置已更新：…` 这类关键诊断信息会一直卡在缓冲区里不落盘，
+# 排查「运行中到底改了什么」时完全看不见（实测踩到：热切换明明发生了，
+# 日志里却一条都没有）。remote_server 的 _log() 带了 flush=True 所以没受影响，
+# 但其它模块的 print 全都会中招。
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except Exception:  # noqa: BLE001
+    pass
+
 
 def _reload_config():
     """让设置向导刚写进 .env 的值在**本次启动**就生效。
