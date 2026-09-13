@@ -35,6 +35,16 @@
           background: rgba(57,197,187,.16); border-radius: 999px;
           padding: 1px 8px; margin-bottom: 4px; }
 
+  /* 水印开关。模型说明第 4 条要求「水印按键默认打开，需在设置表情中关闭」，
+     所以这里按默认开、一键可关。 */
+  #wm {
+    position: fixed; top: 10px; right: 10px; z-index: 30;
+    font-size: 11px; line-height: 1; padding: 5px 9px; border-radius: 999px;
+    border: 1px solid rgba(57,197,187,.45); background: rgba(57,197,187,.16);
+    color: #7fe3da; font-family: inherit; cursor: pointer;
+  }
+  #wm.off { border-color: rgba(255,255,255,.18); background: rgba(255,255,255,.06); color: #8b929c; }
+
   /* 底部输入区 */
   #bar {
     position: fixed; left: 8px; right: 8px; bottom: 8px;
@@ -79,6 +89,8 @@
 
 <div id="bubble"><span id="chip"></span><div id="btext"></div></div>
 
+<button id="wm" title="水印开关（模型默认打开）">水印</button>
+
 <div id="bar">
   <input id="text" placeholder="和 Miku 说点什么…" autocomplete="off">
   <button class="btn" id="cam" title="拍照">📷</button>
@@ -122,22 +134,43 @@ const EMOTION_EXPR = {
   HAPPY: "比心", SURPRISED: "圈圈", MOTIVATED: "唱歌",
   EMPATHY: "脸红", ANGRY: "前倾", SAD: null, NORMAL: null,
 };
-// 模型说明第 4 条要求「水印按键默认打开」，所以加载后先应用水印。
-const DEFAULT_EXPRESSIONS = ["水印"];
+// 水印（「模型所属：玄宝 / 禁止商用 / 非商业使用」那几行叠字）。
+//
+// 这个模型里 Param137=1 表示**隐藏**水印、0 表示显示（实测标定：
+// Param137=1 时画面纯白像素 8 个，=0 时 1897~2781 个）。模型的自然状态是
+// Param137=0，也就是水印默认显示 —— 这正是模型说明第 4 条「水印按键默认打开」。
+//
+// 为什么不用「水印」表情来控制：那个 exp3 只是把 Param137 加 1，
+// 而表情在切换情绪时会被整体重置，水印就会重新冒出来。而且实测
+// model.expression([...]) 传数组时它并不生效（字符串形式才生效），
+// 想跟情绪表情叠加也做不到。所以直接像口型那样驱动参数，最可靠。
+const WM_PARAM = "Param137";
+let watermarkHidden = localStorage.getItem("miku_watermark_hidden") !== "0";
 
 let app = null, model = null, core = null;
 let pendingImage = null;
 let currentExpr = null;
 
-/** 应用表情；传 null 表示清除（保留水印）。 */
+/** 应用表情。传 null 表示清除。 */
 function applyExpression(name) {
   if (!model) return;
   try {
-    if (currentExpr && currentExpr !== name) model.expression(currentExpr);
-    if (name) { model.expression(name); currentExpr = name; }
-    else currentExpr = null;
+    if (name) model.expression(name);   // 必须是**字符串**形式，数组形式实测不生效
+    else model.expression();
+    currentExpr = name || null;
   } catch (e) {
     console.warn("表情 " + name + " 应用失败: " + e.message);
+  }
+}
+
+/** 水印开关：直接改参数，立刻生效且不受情绪表情影响。 */
+function setWatermark(hidden) {
+  watermarkHidden = !!hidden;
+  localStorage.setItem("miku_watermark_hidden", watermarkHidden ? "1" : "0");
+  const btn = $("wm");
+  if (btn) {
+    btn.classList.toggle("off", watermarkHidden);
+    btn.textContent = watermarkHidden ? "水印 关" : "水印";
   }
 }
 
@@ -204,8 +237,9 @@ async function loadModel() {
     window.addEventListener("resize", layout);
     setStatus("已就绪", "on");
 
-    // 模型要求水印默认打开
-    DEFAULT_EXPRESSIONS.forEach((n) => applyExpression(n));
+    // 水印：默认隐藏（用户明确要求去掉）。模型说明第 4 条是「默认打开、
+    // 可在表情设置里关闭」—— 这里保留了开关，想恢复显示点右上角即可。
+    setWatermark(watermarkHidden);
 
     // 挂参数写入器（口型 / 情绪倾角）—— 必须在模型加载后
     bindParamWriter();
@@ -352,6 +386,8 @@ function bindParamWriter() {
     return;
   }
   model.internalModel.on("beforeModelUpdate", () => {
+    // 水印：Param137=1 隐藏、0 显示。放这里驱动，就不受情绪表情切换影响。
+    setParam(WM_PARAM, watermarkHidden ? 1 : 0);
     // 口型：原生侧按**真实播放进度**（AudioTrack.playbackHeadPosition）算好的 RMS 包络。
     // 上升快、下降慢，观感更像说话而不是抽搐。
     mouthNow += (mouthNow < window.__mouth ? 0.55 : 0.25) * (window.__mouth - mouthNow);
@@ -440,6 +476,12 @@ window.Miku.onPhoto = (b64) => {
   $("cam").classList.add("attach");
   setStatus("已就绪", "on");
   showBubble("拍好啦～发送时会一起给 Miku 看", "NORMAL");
+};
+
+// 水印开关。模型里 Param137=1 是隐藏，默认隐藏；想显示回来点一下。
+$("wm").onclick = () => {
+  setWatermark(!watermarkHidden);
+  showBubble(watermarkHidden ? "水印关掉了哦" : "水印开回来啦～", "NORMAL");
 };
 
 $("connect").onclick = () => {

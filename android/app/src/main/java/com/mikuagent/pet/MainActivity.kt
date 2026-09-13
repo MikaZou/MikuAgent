@@ -69,6 +69,9 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
     @Volatile
     private var lastStatus: Pair<String, String>? = null
 
+    /** 模型同步的单飞锁：防止 onCreate 与 WS 就绪两处并发触发同一次同步。 */
+    private val syncing = java.util.concurrent.atomic.AtomicBoolean(false)
+
     /** 待处理的录音权限请求，授权后自动继续 */
     private var pendingRecordAction: (() -> Unit)? = null
 
@@ -192,25 +195,37 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
      *
      * 顺序很重要：页面拿不到完整模型就会渲染失败，所以必须**先同步完再让它加载**。
      * 这也顺带解决了「下载中断留下半截文件」的问题 —— ModelSync 会按 sha1 校验。
+     *
+     * **单飞保护**：本方法有两个触发点（onCreate 的首次连接、以及 WS 就绪后的补同步），
+     * 真机上实测会**并发跑两次**，两个线程往同一个临时文件下载，一个搬走后另一个
+     * 就「落盘失败」，导致整个同步中断、模型缺文件。模拟器上时序错开没撞上。
      */
     private fun syncModel(host: String, port: Int) {
+        if (!syncing.compareAndSet(false, true)) {
+            Log.i(TAG, "已有同步在进行，跳过本次触发")
+            return
+        }
         scope.launch {
-            val result = withContext(Dispatchers.IO) {
-                sync.sync(host, port) { p ->
-                    bridge.onStatus("syncing", "模型 ${p.done}/${p.total}  ${p.percent}%")
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    sync.sync(host, port) { p ->
+                        bridge.onStatus("syncing", "模型 ${p.done}/${p.total}  ${p.percent}%")
+                    }
                 }
-            }
-            when (result) {
-                is ModelSync.Result.Ready -> {
-                    Log.i(TAG, "模型就绪：下载 ${result.downloaded} 个，跳过 ${result.skipped} 个")
-                    modelReady = true
-                    bridge.onStatus("model_ready", "模型已就绪")
-                    if (pageReady) bridge.loadModel()
+                when (result) {
+                    is ModelSync.Result.Ready -> {
+                        Log.i(TAG, "模型就绪：下载 ${result.downloaded} 个，跳过 ${result.skipped} 个")
+                        modelReady = true
+                        bridge.onStatus("model_ready", "模型已就绪")
+                        if (pageReady) bridge.loadModel()
+                    }
+                    is ModelSync.Result.Failed -> {
+                        Log.e(TAG, "模型同步失败: ${result.message}")
+                        bridge.onError("模型同步失败：${result.message}")
+                    }
                 }
-                is ModelSync.Result.Failed -> {
-                    Log.e(TAG, "模型同步失败: ${result.message}")
-                    bridge.onError("模型同步失败：${result.message}")
-                }
+            } finally {
+                syncing.set(false)
             }
         }
     }

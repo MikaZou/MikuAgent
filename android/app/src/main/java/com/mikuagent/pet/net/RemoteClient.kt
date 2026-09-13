@@ -68,6 +68,16 @@ class RemoteClient(private val onEvent: (Event) -> Unit) {
     private var retryCount = 0
     private var manuallyClosed = false
 
+    /**
+     * 连接「代次」。每次 connect/disconnect 自增，旧连接的回调带着旧令牌回来时直接作废。
+     *
+     * 为什么必须有这个：OkHttp 的 onFailure/onClosed 是**异步**回调，可能在新一轮
+     * connect() 之后才到。它会把 `socket = null`（把新连接的引用清掉）并再调度一次
+     * 重连，结果同一个 App 在服务端占**两条**连接 —— 消息收两份、Miku 重复回复、
+     * 重复说话。真机上切换地址（127.0.0.1 -> 局域网 IP）时实测踩到。
+     */
+    private var generation = 0
+
     private fun post(e: Event) = main.post { onEvent(e) }
 
     /** 连接。host 可以是 `192.168.1.5`，也可以是模拟器访问宿主机的 `10.0.2.2`。 */
@@ -75,48 +85,60 @@ class RemoteClient(private val onEvent: (Event) -> Unit) {
         manuallyClosed = false
         val url = "ws://$host:$port/ws"
         if (url == currentUrl && socket != null) return
+
+        // 换地址时**必须**先关掉旧连接并作废它的重连，否则旧 socket 会一直活着
+        val old = socket
+        socket = null
+        runCatching { old?.close(1000, "换地址") }
+
         currentUrl = url
+        val myGen = ++generation
+        retryCount = 0
         post(Event.Status(Event.State.CONNECTING, url))
 
         val req = Request.Builder().url(url).build()
         socket = client.newWebSocket(req, object : WebSocketListener() {
             override fun onOpen(ws: WebSocket, response: Response) {
+                if (myGen != generation) return runCatching { ws.close(1000, "过期连接") }.let {}
                 retryCount = 0
                 Log.i(TAG, "已连接 $url")
                 post(Event.Status(Event.State.CONNECTED, url))
             }
 
             override fun onMessage(ws: WebSocket, text: String) {
+                if (myGen != generation) return
                 dispatch(text)
             }
 
             override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
+                if (myGen != generation) return
                 Log.w(TAG, "连接失败: ${t.message}")
                 socket = null
                 post(Event.Status(Event.State.FAILED, t.message ?: "未知错误"))
-                scheduleReconnect()
+                scheduleReconnect(myGen)
             }
 
             override fun onClosed(ws: WebSocket, code: Int, reason: String) {
+                if (myGen != generation) return
                 Log.i(TAG, "连接关闭 code=$code reason=$reason")
                 socket = null
                 post(Event.Status(Event.State.DISCONNECTED, reason))
-                scheduleReconnect()
+                scheduleReconnect(myGen)
             }
         })
     }
 
-    private fun scheduleReconnect() {
-        if (manuallyClosed) return
-        val host = currentUrl ?: return
+    private fun scheduleReconnect(myGen: Int) {
+        if (manuallyClosed || myGen != generation) return
+        val url = currentUrl ?: return
         // 退避：2s, 4s, 8s… 上限 15s，避免 PC 没开时疯狂重连
         val delayMs = minOf(15_000L, 2_000L shl minOf(retryCount, 3))
         retryCount++
         Log.i(TAG, "${delayMs}ms 后重连（第 $retryCount 次）")
         main.postDelayed({
-            if (!manuallyClosed) {
-                currentUrl = null      // 允许用同一个 URL 重新连
-                val m = Regex("ws://([^:]+):(\\d+)/ws").find(host)
+            // 期间若用户手动切过地址/断开，这一轮就作废
+            if (!manuallyClosed && myGen == generation) {
+                val m = Regex("ws://([^:]+):(\\d+)/ws").find(url)
                 if (m != null) connect(m.groupValues[1], m.groupValues[2].toInt())
             }
         }, delayMs)
@@ -179,8 +201,11 @@ class RemoteClient(private val onEvent: (Event) -> Unit) {
 
     fun disconnect() {
         manuallyClosed = true
-        socket?.close(1000, "bye")
+        generation++          // 作废所有在途回调与重连
+        val old = socket
         socket = null
+        currentUrl = null
+        runCatching { old?.close(1000, "bye") }
         client.dispatcher.executorService.shutdown()
     }
 

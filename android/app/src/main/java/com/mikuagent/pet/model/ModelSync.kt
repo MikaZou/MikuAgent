@@ -97,30 +97,36 @@ class ModelSync(private val context: Context) {
             val target = File(dir, rel)
             target.parentFile?.mkdirs()
 
-            val tmp = File(target.parentFile, target.name + ".part")
+            // 临时文件名带上线程/时间戳，**不能**用固定的 `xxx.part`：
+            // 曾经有两个同步并发跑，往同一个 .part 写，一个 rename 成功后
+            // 另一个就「落盘失败」（真机上实测踩到，模拟器时序错开没撞上）。
+            val tmp = File(
+                target.parentFile,
+                target.name + "." + Thread.currentThread().id + "." + System.nanoTime() + ".part",
+            )
             try {
                 downloadTo("$base/model/$rel", tmp)
             } catch (e: Exception) {
                 tmp.delete()
-                return Result.Failed("下载 $rel 失败：${e.message}")
+                return Result.Failed("下载 $rel 失败：${describe(e)}")
             }
 
             // 大小与哈希都要对 —— 半截文件最常见的表现就是大小对不上
             if (tmp.length() != size) {
+                val got = tmp.length()
                 tmp.delete()
-                return Result.Failed("$rel 大小不符（期望 $size，实得 ${tmp.length()}）")
+                return Result.Failed("$rel 大小不符（期望 $size，实得 $got）")
             }
             val actual = sha1(tmp)
             if (actual != meta.first) {
                 tmp.delete()
                 return Result.Failed("$rel 校验失败（sha1 不符）")
             }
-            if (!tmp.renameTo(target)) {
-                target.delete()
-                if (!tmp.renameTo(target)) {
-                    tmp.delete()
-                    return Result.Failed("$rel 落盘失败")
-                }
+            // 用 Files.move(REPLACE_EXISTING) 而不是 File.renameTo：
+            // renameTo 在目标已存在时行为不可靠（Android 上实测会失败）。
+            if (!moveInto(tmp, target)) {
+                tmp.delete()
+                return Result.Failed("$rel 落盘失败（无法移动到 ${target.name}）")
             }
             downloaded++
             bytesDone += size
@@ -147,6 +153,38 @@ class ModelSync(private val context: Context) {
             return out
         }
     }
+
+    /** 把临时文件搬到目标位置，覆盖已存在的目标。三条路依次尝试。 */
+    private fun moveInto(tmp: File, target: File): Boolean {
+        // 1) 原子替换（首选）
+        try {
+            java.nio.file.Files.move(
+                tmp.toPath(), target.toPath(),
+                java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+            )
+            return true
+        } catch (_: Exception) {
+        }
+        // 2) 先删目标再改名
+        try {
+            if (target.exists()) target.delete()
+            if (tmp.renameTo(target)) return true
+        } catch (_: Exception) {
+        }
+        // 3) 兜底：直接拷内容（慢但一定能成）
+        return try {
+            tmp.inputStream().use { ins ->
+                target.outputStream().use { outs -> ins.copyTo(outs, 1 shl 16) }
+            }
+            tmp.delete()
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun describe(e: Exception): String =
+        e.message ?: e.javaClass.simpleName
 
     private fun downloadTo(url: String, dest: File) {
         val req = Request.Builder().url(url).build()
