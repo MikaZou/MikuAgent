@@ -156,3 +156,14 @@ def resolve_path(value: str) -> Path:
     return p if p.is_absolute() else (BASE_DIR / p)
 
 HAS_API_KEY = bool(DEEPSEEK_API_KEY) and DEEPSEEK_API_KEY != "sk-xxxxxxxx"
+
+
+# ===== 手机端（路线 A）拉取的模型目录 =====
+# 为什么必须和 MODEL_PATH 分开：PC 桌宠的动作/表情/参数映射（ui/live2d_view.py）
+# 是照着**旧模型**（moc3 v4，13 动作 / 6 组，Saihong/Chijing/liuhan）硬编码的。
+# 把 MODEL_PATH 指到新的 moc3 v5 模型会直接把桌宠的渲染搞坏 —— 而手机端可以
+# 独立换成新模型。不设这个变量时与桌宠共用同一个模型，保持原有行为。
+#
+# 定义在这里而不是 MODEL_PATH 旁边：resolve_path() 在文件末尾才定义。
+_remote_model_dir = os.getenv("REMOTE_MODEL_DIR", "").strip()
+REMOTE_MODEL_DIR = resolve_path(_remote_model_dir) if _remote_model_dir else MODEL_PATH.parent

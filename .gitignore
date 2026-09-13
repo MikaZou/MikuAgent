@@ -15,5 +15,17 @@ Thumbs.db
 # 参考音频来自第三方版权素材，不入库（各人自备）
 assets/voice/
 
+# Live2D 模型（第三方作品，授权写明「不可二传二改、严禁商用」）—— 绝不入库。
+# 手机端 APK 也不打包模型，改为运行时从 PC 拉取到应用私有目录。
+models/
+
+# 安卓构建产物
+android/.gradle/
+android/**/build/
+android/local.properties
+android/.idea/
+*.apk
+*.aab
+
 # 提交信息临时文件
 .cmsg*

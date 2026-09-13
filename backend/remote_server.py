@@ -49,7 +49,9 @@ from aiohttp import WSMsgType, web
 import config
 
 WEB_DIR = config.BASE_DIR / "web"
-MODEL_DIR = config.MODEL_PATH.parent
+# 手机端拉取的模型目录。刻意用 REMOTE_MODEL_DIR 而不是 MODEL_PATH.parent：
+# 手机端可以指向新模型（moc3 v5），而 PC 桌宠继续用旧模型，互不影响。
+MODEL_DIR = config.REMOTE_MODEL_DIR
 
 
 def _log(msg: str) -> None:
@@ -120,10 +122,58 @@ class RemoteServer:
         app.router.add_get("/", self._handle_index)
         app.router.add_get("/ws", self._handle_ws)
         app.router.add_get("/health", self._handle_health)
+        # ⚠️ 必须注册在 add_static("/model/") **之前**：aiohttp 按注册顺序匹配，
+        # 排在后面的话 /model/manifest 会被静态处理器接走，变成 404。
+        app.router.add_get("/model/manifest", self._handle_manifest)
         # 手机端要用的静态资源
         app.router.add_static("/static/", WEB_DIR, show_index=False)
         app.router.add_static("/model/", MODEL_DIR, show_index=False)
         return app
+
+    @staticmethod
+    def _scan_model_dir() -> list[dict]:
+        """列出模型目录里的文件：相对路径、字节数、sha1。
+
+        为什么需要哈希而不是「文件存在就跳过」：手机端下载中断会留下**半截
+        文件**，只判断存在会把坏文件当成好的，渲染时才发现模型缺贴图。
+        """
+        import hashlib
+
+        items: list[dict] = []
+        try:
+            paths = sorted(p for p in MODEL_DIR.rglob("*") if p.is_file())
+        except OSError as exc:  # noqa: BLE001
+            _log(f"扫描模型目录失败：{exc}")
+            return items
+
+        for path in paths:
+            try:
+                digest = hashlib.sha1()
+                size = 0
+                with path.open("rb") as fh:
+                    for chunk in iter(lambda: fh.read(1 << 20), b""):
+                        digest.update(chunk)
+                        size += len(chunk)
+            except OSError:
+                continue
+            items.append({
+                # 统一用 posix 分隔符，手机端直接拼 URL 即可
+                "path": path.relative_to(MODEL_DIR).as_posix(),
+                "size": size,
+                "sha1": digest.hexdigest(),
+            })
+        return items
+
+    async def _handle_manifest(self, request: web.Request) -> web.Response:
+        """模型清单，供手机端增量同步与完整性校验。"""
+        files = await asyncio.to_thread(self._scan_model_dir)
+        total = sum(f["size"] for f in files)
+        return web.json_response({
+            "root": MODEL_DIR.name,
+            "count": len(files),
+            "total": total,
+            "files": files,
+        })
 
     async def _handle_health(self, request: web.Request) -> web.Response:
         return web.json_response({
