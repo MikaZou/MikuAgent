@@ -110,27 +110,97 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 页面报告 `RENDER_FAILED` 且原因是 WebGL 上下文丢失时，`MainActivity` 会
 **自动降到 0.5 重试一次**。
 
+## 在模拟器上跑（若干坑，都已实测）
+
+```bash
+# 1. 启动（AOSP 镜像比 google_apis 轻，推荐）
+emulator -avd <名字> -no-snapshot -no-boot-anim -gpu host -memory 1536
+
+# 2. 模拟器访问宿主机固定是 10.0.2.2（App 会自动填，无需手输）
+
+# 3. 授权运行时权限（否则「按住说话」会卡在权限弹窗）
+adb shell pm grant com.mikuagent.pet android.permission.RECORD_AUDIO
+adb shell pm grant com.mikuagent.pet android.permission.CAMERA
+```
+
+### 坑 1：Chromium 把模拟器 GPU 拉黑名单，WebGL 直接不可用
+
+报错 `ContextResult::kFatalFailure: WebGL1 blocklisted`，PIXI 会提示
+`WebGL unsupported in this browser`。**真机不受影响**，是模拟器的
+「Android Emulator OpenGL ES Translator」在 Chromium 的 GPU 黑名单里。
+
+绕过办法是给 WebView 写命令行标志（官方支持的调试机制）：
+
+```bash
+adb shell "echo '_ --ignore-gpu-blocklist --enable-unsafe-swiftshader' > /data/local/tmp/webview-command-line"
+adb shell chmod 644 /data/local/tmp/webview-command-line
+```
+
+写完重启 App 生效。这个文件在 AVD 的 userdata 里，重启模拟器仍在
+（除非 `-wipe-data`）。
+
+### 坑 2：`adb shell input tap` 打不中 WebView 里的 HTML 控件
+
+WebView 内的 HTML 输入框拿不到焦点，`input text` 的字符会丢失，
+点击也常被系统弹窗截走。端到端测试改用 **WebView DevTools 协议**
+直接在页面上下文里执行 JS：
+
+```bash
+adb forward tcp:9222 localabstract:webview_devtools_remote_$(adb shell pidof com.mikuagent.pet)
+# 然后连 ws://127.0.0.1:9222 的 webSocketDebuggerUrl，发 Runtime.evaluate
+```
+
+`.tmp/cdp_chat.py` 就是这个用途（`probe` / `chat` / `eval`）。
+
+### 坑 3：开发机内存不够会直接把模拟器饿到 ANR
+
+实测本机页面文件被**固定为 16GB 且非系统管理**，提交上限 = 15.7GB 物理
++ 16GB 页面文件 ≈ 31.7GB。模拟器一跑就顶到 31.5GB，Android 的
+system_server 被饿死，弹「Process system isn't responding」。
+
+缓解办法（按性价比排序）：
+
+1. 构建前先 `adb emu kill` 停掉模拟器，别同时跑（Gradle 会报
+   `Native memory allocation (malloc) failed`）
+2. 测试时让 PC 服务端走**云端转写**：`STT_TRANSCRIBER=minimax` 启动，
+   服务端提交量从 2905MB 降到 673MB
+3. 根治要**以管理员身份**把页面文件改成「系统管理」或调大上限，然后重启
+
 ## 排查
 
 ```bash
-adb logcat -s MikuAgent:* MikuJS:* AssetServer:* RemoteClient:* ModelSync:*
+adb logcat -s MikuAgent:* MikuJS:* AssetServer:* RemoteClient:* ModelSync:* AudioCapture:*
 ```
 
 关键行：
 
-- `RENDER_READY {...}` —— 渲染成功的自证信息（Core 版本、Drawable 数、贴图数、加载耗时）
+- `RENDER OK {...}` —— 渲染成功的自证信息（Core 版本、贴图数与尺寸、
+  Drawable 数、参数数、包围盒、缩放）
 - `RENDER_FAILED ...` —— 渲染失败原因
-- `模型就绪：下载 N 个，跳过 M 个`
+- `LOCAL_BOUNDS {...}` / `LAYOUT ...` —— 模型定位（排查「只看到一半」用）
+- `补全 N 个表情 / M 个动作` —— model3.json 内存补全是否生效
+- `模型就绪：下载 N 个，跳过 M 个` —— 模型同步
 - `已连接 ws://...`
+- `录音结束 X.XXs / N KB` → `上传语音 X.XXs`
 
-## 当前进度与未完成项
+PC 侧同一时刻的交互记录在 `data/remote.log`（对话 / 语音 / 转写）。
 
-已完成：环境搭建、模型解包与校验、PC 侧模型服务、渲染管线、原生 I/O、口型包络。
+## 当前进度
 
-未完成（见计划 §6）：
+已完成：环境搭建、模型解包与校验、PC 侧模型服务、渲染管线、原生 I/O、
+口型包络、表情/动作内存补全、端到端对话（模拟器实测）。
 
-- **Phase 4**：表情/动作。新模型的 `model3.json` 里 `Expressions`/`Motions` 是空的，
-  9 个表情是独立 `.exp3` 文件，要靠 `miku.vtube.json` 的热键表映射后在内存里补全。
-  另外模型要求「水印表情默认打开」，也要在这一步做。
-- **相机**：`Bridge` 里已有回传通道，`PhotoTaker` 待实现。
-- 真机验收（384 MB 贴图在 iQOO 上的实际表现）。
+**模拟器实测证据**：模型完整渲染（6×4096² 贴图、141 参数、440 drawable）；
+经 WebView DevTools 驱动页面调原生桥发消息，气泡正确显示回复与情绪；
+`data/remote.log` 记录到「对话 / 语音 / 转写」（此前全为 0）。
+
+未完成：
+
+- **真机验收**：384MB 贴图在 iQOO 上的实际表现只能真机测（模拟器用
+  SwiftShader 绕开了黑名单，显存表现不代表真机）
+- **真实语音识别**：模拟器没有真实麦克风输入，转写通路验证到了
+  「上传 → 识别 → 返回」，但识别内容是静音。需要真机对着说话验证
+- **相机**：`Bridge` 里已有回传通道，`PhotoTaker` 待实现
+- **Android Studio**：安装包已下好（`D:\Android\downloads\android-studio.exe`
+  与免安装的 `android-studio.zip`），尚未安装。安装后记得把 SDK 路径
+  指向 `D:\Android\Sdk`（安装器默认想装到 `C:\Users\<你>\AppData\Local\Android\sdk`）
