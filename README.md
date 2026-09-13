@@ -309,27 +309,59 @@ python tools\diag_vision.py api        # 验证 DeepSeek 视觉 API 生效 + 量
 python tools\diag_vision.py pipeline   # 不需要摄像头的端到端验证
 ```
 
-## 📱 手机端（同一局域网）
+## 📱 手机端
 
 PC 端**仍然是原生桌宠窗口**，手机只是它的一个瘦客户端 —— 所有 AI 逻辑都在 PC 上跑。
+三端（桌面 / 手机 / 网页）**共用同一个进程里的一批对象**（agent / 记忆 / TTS / STT），
+所以共享长期记忆与**当天的会话**：在桌面聊完切到手机能接上同一个话题。
+
+手机端有两种入口，**推荐用原生 App**：
+
+### 方式一：原生 Android App（推荐）
+
+`android/` 下的 Kotlin 客户端。**WebView 只负责渲染 Live2D，不联网**；
+WebSocket / 录音 / 播放 / 口型 / 相机全部由 Kotlin 持有。
+
+**为什么不用浏览器**：`http://192.168.x.x` **不是安全上下文**，
+浏览器里 `navigator.mediaDevices` 直接是 `undefined`，麦克风和摄像头根本用不了
+（这不是权限问题，加什么参数都没用）。原生端没有这个限制。
 
 **用法**
 
 1. PC 上启动桌宠（`start.bat`），控制台会打印形如 `http://192.168.x.x:8765/` 的地址
-2. 手机连**同一个 WiFi**，浏览器打开那个地址
-3. 直接打字 / 按住 🎤 说话 / 点 📷 拍照发给她
+2. 手机连**同一个 WiFi**，装好 APK 后打开，填入那个地址
+3. 打字 / 按住 🎤 说话 / 点 📷 拍照 / 点 📹 开视频对话
 
-手机端能做：Live2D 渲染与口型、文字对话、语音输入、拍照给 Miku 看、情感表情动作，
-**与 PC 端用完全一致的映射**（同一张情感→表情/动作表）。
+**能做**：Live2D 渲染与口型、文字对话、语音输入输出、拍照与视频对话、情绪表情动作。
 
 **说明**
 
-- 手机需要能访问 CDN 加载 PIXI.js 与 pixi-live2d-display；受限时在 `.env` 里
+- **模型不打进 APK**（授权要求「不可二传二改」），首次运行从 PC 拉取
+  （约 34MB，逐文件 sha1 校验后缓存在应用私有目录），之后启动不再下载
+- **零 CDN**：PIXI / pixi-live2d-display / Cubism Core 全部打进 APK，
+  经 `WebViewAssetLoader` 挂在 `https://appassets.androidplatform.net/` 下
+- 想用 USB 线联调可以 `adb reverse tcp:8765 tcp:8765`，然后用 `127.0.0.1` 连 ——
+  **完全绕开 WiFi、路由器隔离和防火墙**
+- 自行构建：`cd android && gradle assembleDebug`（需要 JDK 17+ 与 Android SDK 35），
+  详见 `android/README.md`（含模拟器、真机与排查）
+
+### 方式二：浏览器（备用入口）
+
+1. PC 上启动桌宠，手机连**同一个 WiFi**，浏览器打开控制台打印的地址
+2. 直接打字 / 按住 🎤 说话 / 点 📷 拍照发给她
+
+适合快速验证，或在没有装 APK 的设备上用。**但麦克风与摄像头在手机上不可用**
+（原因见上），只能打字和拍照；桌面浏览器打开则完全正常。
+
+**说明**
+
+- 浏览器端需要能访问 CDN 加载 PIXI.js 与 pixi-live2d-display；受限时在 `.env` 里
   改 `REMOTE_CDN` 为可用镜像。**Live2D 模型文件始终由 PC 提供，不依赖外网。**
 - 端口默认 `8765`（`.env` 的 `REMOTE_PORT`）；不想要就设 `REMOTE_ENABLED=false`，
   **关掉它完全不影响 PC 端桌宠**。
 - 为什么手机端也建议走云端 TTS/STT：本地 GPT-SoVITS + Whisper 要 3.6GB 内存 +
   2.2GB 显存，PC 自己都很紧张；切到 MiniMax 后 PC 只用 **248MB 内存 + 538MiB 显存**。
+
 
 ## ❓ 常见问题
 

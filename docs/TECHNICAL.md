@@ -1,12 +1,13 @@
 # MikuAgent 技术文档
 
-> 版本：对应提交 `2100fda`
+> 版本：对应提交 `061d47c`
 > 环境：Windows 11 build 26200 · Python 3.10.18 · RTX 3050 Ti Laptop 4GB · 驱动 580.97
+> 移动端：Android 16 (SDK 36) · arm64-v8a · iQOO V2452A · WebView 138
 
-本文档分三部分：**现状实现**（TTS / Live2D 动作）、**后续需求的可行方案**、**附录工具与踩坑记录**。
+本文档分三部分：**现状实现**（TTS / Live2D 动作 / 远程客户端）、**后续需求的可行方案**、**附录工具与踩坑记录**。
 
 文中标注：
-- **【实测】** = 本机跑出来的数据，附测量方法
+- **【实测】** = 本机或真机跑出来的数据，附测量方法
 - **【代码】** = 当前代码里的事实
 - **【推断】** = 尚未验证的分析与建议
 
@@ -32,6 +33,10 @@
                     │              │                       │
                     │              ▼                       │
                     │        socket 127.0.0.1:18520        │
+                    │                                      │
+                    │  RemoteServer（同进程 daemon 线程）    │
+                    │      └─ aiohttp: HTTP + WS 同端口     │
+                    │         复用 agent/memory/tts/stt     │
                     └──────────────┼───────────────────────┘
                                    ▼
                     ┌──────────────────────────────────────┐
@@ -42,7 +47,21 @@
                                    ▼
                     播放(sounddevice) + 口型(WavHandler)
                     读同一份 WAV ──▶ 天然同步
+
+   ┌────────────────────────┐        ┌──────────────────────────┐
+   │  手机（原生 Android）   │        │  网页端（备用入口）        │
+   │  Kotlin 负责全部 I/O    │◀─WS───▶│  web/phone.html           │
+   │  WebView 只负责渲染     │        │  浏览器直接跑             │
+   │  ── 见 §5.9 ──         │        └──────────────────────────┘
+   └────────────────────────┘
 ```
+
+**手机端的 I/O 全部在 Kotlin，WebView 只做 Live2D 渲染、不联网。**
+原因见 §5.9.1：`http://192.168.x.x` 不是安全上下文，浏览器里
+`navigator.mediaDevices` 直接是 `undefined`，麦克风和摄像头都用不了。
+
+三个客户端**共用桌宠进程里的同一批对象**（agent / memory / tts / stt），
+所以三端共享长期记忆与当天的会话（见 §5.10）。
 
 ### 1.2 组件清单
 
@@ -58,6 +77,23 @@
 | 视觉 | DeepSeek 原生多模态 + `opencv-python-headless`（可选） | cv2 5.0 |
 | 记忆 | SQLite | 3 |
 | 音频 | sounddevice / PyAV | 0.5.6 / 17.1.0 |
+| 远程服务 | aiohttp（HTTP + WebSocket 同端口） | — |
+
+**手机端（原生 Android，见 §5.9）**
+
+| 层 | 技术 | 版本 |
+| --- | --- | --- |
+| 语言 / 构建 | Kotlin · AGP · Gradle | 2.0.21 · 8.6.1 · 8.9 |
+| SDK | compileSdk / minSdk / targetSdk | 35 / 26 / 35 |
+| 渲染宿主 | WebView（`WebViewAssetLoader`，**零 CDN**） | Chromium 138 |
+| 渲染库 | PIXI + pixi-live2d-display + Cubism Core for Web | 6.5.10 · 0.4.0 · 5.1.0.0 |
+| 网络 | OkHttp WebSocket | 4.12.0 |
+| 相机 | CameraX（camera-core / camera-camera2 / camera-lifecycle） | 1.3.4 |
+| 音频 | `AudioRecord`（16k 单声道 PCM16）/ `AudioTrack`（MODE_STATIC） | 平台 API |
+| 异步 | kotlinx-coroutines-android | 1.8.1 |
+
+> Android 端的 Cubism Core **5.1.0.0 与 PC 端 live2d-py 的 Native Core 同版本**，
+> 所以同一个 moc3 在两端的行为一致。授权见 §6.5。
 
 ---
 
@@ -984,6 +1020,10 @@ t=...   播放结束 ──▶ 回到待机调度
 ### 5.4 手机版可行性
 
 > 起因：看到有人把那个免费 Live2D 初音模型加载进了手机，问本项目能否也做手机版。
+>
+> ✅ **已实现**：本节是当初的可行性分析，落地结果见 **§5.9（原生 Android 客户端）**。
+> 结论走向与这里的推断基本一致，但**客户端形态换了**：浏览器方案因
+> 「非安全上下文拿不到麦克风/摄像头」被放弃，改成了原生 App。
 
 #### 5.4.1 先分清两件事
 
@@ -1334,7 +1374,18 @@ MINIMAX_ASR_MODEL=asr-1.0
 > **步骤 1 是关键**：它是**纯重构、零行为变化**，可以先做、单独验证，
 > 不影响任何现有功能。做完之后步骤 2~5 都只是「加一个 provider 实现」。
 
-### 5.6 路线 A 的实现（**已完成**）
+### 5.6 路线 A 的实现（**浏览器版，已被 §5.9 取代**）
+
+> ⚠️ **本节记录的是最早的浏览器客户端**（`web/phone.html`）。它在真机上暴露了两个
+> 无法在浏览器里解决的问题 —— **不是安全上下文导致麦克风/摄像头不可用**，以及
+> **渲染失败会连带把对话也拖死**（见 §5.9.1）。所以手机端已改为**原生 Android 应用**，
+> 见 §5.9。本节保留是因为：
+> 1. 网页端**仍是可用的备用入口**（桌面浏览器上打开完全正常，没有安全上下文问题）
+> 2. 协议、`/model/` 下发、`asyncio.to_thread` 这些设计**被原生端完整继承**
+>
+> 下面这些细节已经过时，读的时候注意：客户端**不再走 CDN**（库已打进 APK）、
+> 模型来源从 `assets/live2d/miku/`（旧模型）换成了 `models/miku_v5/`（新模型），
+> 并且多了 `/model/manifest` + sha1 校验 + 设备侧缓存的机制。
 
 5.4.5 只写了路线 A 的思路，这里记录实际落地结果。
 
@@ -1659,6 +1710,333 @@ python tools/test_bubble_scroll.py
 
 ---
 
+### 5.9 原生 Android 客户端（**已完成，真机验证**）
+
+#### 5.9.1 为什么放弃浏览器
+
+浏览器版（§5.6）在真机上撞到两个**在浏览器里无解**的问题：
+
+| 问题 | 根因 |
+| --- | --- |
+| 麦克风 / 摄像头完全不可用 | `http://192.168.x.x` **不是安全上下文**，`navigator.mediaDevices` 直接是 `undefined`。这不是权限问题，加多少 `allow=` 都没用 |
+| 渲染失败会连带把对话拖死 | `phone.html` 里 `connect()` 排在 `initLive2D()` 之后，模型一崩，聊天也没了 |
+
+原生端没有这两个限制。**WebView 只负责渲染 Live2D，不联网**；
+WebSocket / 录音 / 播放 / 口型 / 相机全部由 Kotlin 持有。
+
+#### 5.9.2 架构
+
+```
+        ┌──────────────────── Android App ────────────────────┐
+        │                                                     │
+        │  MainActivity ──┬── RemoteClient   (OkHttp WS)       │
+        │                 ├── AudioCapture   (AudioRecord 16k) │
+        │                 ├── AudioPlayer    (AudioTrack)      │
+        │                 ├── PhotoTaker     (CameraX)         │
+        │                 ├── ModelSync      (/model/manifest) │
+        │                 └── AssetServer    (WebViewAssetLoader)
+        │                          │                          │
+        │                          ▼                          │
+        │  WebView（只渲染）◀── Bridge（@JavascriptInterface） │
+        │    index.html + PIXI + cubism4 + Cubism Core 5.1    │
+        └──────────────────────────┬──────────────────────────┘
+                                   │ ws://<pc>:8765/ws
+                                   ▼
+                        桌宠进程的 RemoteServer
+```
+
+**两个关键设计：**
+
+- **页面零 CDN。** PIXI / pixi-live2d-display / Cubism Core 全部打进 APK 的
+  `assets/web/lib/`，经 `WebViewAssetLoader` 挂在
+  `https://appassets.androidplatform.net/assets/` 下。
+  这既让页面**变成安全上下文**，也彻底摆脱了 CDN 依赖。
+- **WebSocket 放在 Kotlin。** 页面是 `https://`，从页面里发 `ws://` 会被
+  混合内容策略拦掉；Kotlin 侧没有这个限制。
+
+#### 5.9.3 模型下发：不打包、按需同步、逐文件校验
+
+**授权约束**：新模型「不可二传二改」，所以**不打进 APK、不提交进 git**
+（`.gitignore` 里的 `models/`）。改为运行时从 PC 拉到应用私有目录。
+
+```
+GET /model/manifest
+  → {"files":[{"path":"miku.moc3","size":9509440,"sha1":"…"}, …], "total_bytes":…}
+GET /model/<相对路径>          # 逐文件下载
+```
+
+客户端流程：先只按 **size** 过滤出缺失/长度不符的文件（避免每次都哈希 34MB），
+下载到**唯一命名的临时文件**再校验 **sha1**，通过后才搬进目标位置。
+
+两个真机踩到的坑：
+
+- **同步并发竞争**：`onCreate` 的首次连接与 WS 就绪后的补同步会**并发跑两次**，
+  两个线程往同一个 `.part` 写，一个搬走后另一个就「落盘失败」，整个同步中断、
+  模型缺文件（实测缺了 `items_pinned_to_model.json`）。修法：单飞锁 +
+  临时文件名带线程 id 与时间戳。
+- **`File.renameTo` 在目标已存在时不可靠**，改用
+  `Files.move(REPLACE_EXISTING)`，并留「先删再改名」「流拷贝」两级回退。
+
+#### 5.9.4 渲染：按**美术**包围盒适配，不是按画布
+
+`model.getLocalBounds()` 返回的是**画布**（3500×8888），但这个模型的美术
+**超出了画布**，且角色在画布内并不居中：
+
+| | 画布坐标 | 换算成 CSS（scale≈0.075） |
+| --- | --- | --- |
+| 美术 X | 782 ~ 5158（宽 **4375**） | 宽 **437px** |
+| 美术 Y | −91 ~ 8898（高 **8989**） | 高 **899px** |
+
+画布只有 3500 宽、8888 高，而手机 CSS 宽度只有 360 —— 按画布缩放后美术宽
+437 CSS，**右侧必然被裁**（实测：左边距 289px、右边距 0）。
+
+修法是遍历 440 个 drawable 求顶点并集，得到美术真实包围盒再适配，
+并把它对齐到「避开顶部状态条与底部输入栏」的可用区中心。
+
+换算关系（`getDrawableVertices()` 返回的**不是**画布像素，原点在画布中心）：
+
+```js
+const ppu = model.internalModel.width / core.getCanvasWidth();  // 3500/0.7415 = 4720
+const canvasX = model.internalModel.width  / 2 + vx * ppu;
+const canvasY = model.internalModel.height / 2 + vy * ppu;
+```
+
+**【实测】** 修复前后（真机截屏后扫非背景像素求包围盒）：
+
+| | 修复前 | 修复后 |
+| --- | --- | --- |
+| 右侧被裁 | 是 | **否** |
+| 顶部被裁 | 是 | **否** |
+| 下边距 | 1px（贴住输入栏） | 34px |
+| 左右边距差 | 289px | 70px |
+| 占屏宽 | 73.1% | 86.8% |
+
+> 残留的 ~70px 不对称来自待机动画改变姿态（包围盒只在加载时量一次），视觉上可接受。
+
+#### 5.9.5 口型：必须写在 `beforeModelUpdate` 里
+
+从压缩后的 `cubism4.min.js` 里读出的真实调用顺序：
+
+```js
+emit("afterMotionUpdate");
+coreModel.saveParameters();     // 存参数快照
+... expression / eyeBlink / physics / pose ...
+emit("beforeModelUpdate");      // ← 写自定义参数的正确位置
+coreModel.update();             // ← 用刚写的值算顶点并绘制
+coreModel.loadParameters();     // ★ 载回快照，把刚写的值抹掉
+```
+
+两条反直觉的推论：
+
+1. **写在 `beforeModelUpdate` 里的值会被正常绘制，但帧与帧之间读不到** ——
+   每帧末尾都被 `loadParameters()` 还原。在帧外读参数永远读到快照值，
+   会让人误判成「参数没生效」。**必须挂一个同样在 `beforeModelUpdate` 的
+   只读探针、在帧内读**。
+2. 别用 `requestAnimationFrame` 写参数：rAF 回调落在帧间，写进去的值会先被
+   `motionManager.update()` 覆盖、再被 `saveParameters()` 存成快照，时机不可控。
+
+**【实测】** 用帧内探针测口型：469 帧内范围 0~0.59、69 个不同值，
+与原生 RMS 包络（0~0.611、134 个不同值）跟随良好。
+
+**口型包络的来源**：`AudioTrack.playbackHeadPosition`（不是写入位置 ——
+写入位置会领先于实际听到的声音），约 30Hz 采样算 RMS，上升快下降慢。
+
+#### 5.9.6 语音输入：真机上的音源陷阱
+
+**【实测】** 真机语音一直「转写中」无响应，服务端每次返回空字符串。
+加了音频电平日志后才定位到：
+
+```
+收到语音 2.04s @16000Hz 单声道  峰值=0.011  RMS=0.0023   ← 近乎静音
+```
+
+格式完全正确（16kHz 单声道、时长也对），但电平比正常说话低一到两个数量级。
+
+**根因**：`AudioRecord` 的音源用了 `MediaRecorder.AudioSource.VOICE_RECOGNITION`。
+这个音源名义上更适合 ASR，但 **vivo/iQOO 上实测采到的是静音**。
+换成标准 `MIC` 后：
+
+| | 修复前 | 修复后 |
+| --- | --- | --- |
+| 峰值 | 0.011 | **0.769** |
+| RMS | 0.0023 | **0.1167** |
+| 转写 | `''` | 「你现在听得到我说话吗？」 |
+
+> 这个 bug **从 App 侧完全看不出来**：录音成功、时长正确、上传成功。
+> 只有打印音频电平才能区分「麦克风没收到声音」和「格式不对」。
+> 所以诊断信息不是可选项 —— 现在 App 和服务端**两端都打电平**。
+
+#### 5.9.7 视频对话：与 PC 同方案（说话时附一帧，不推流）
+
+**不是持续视频流**，而是**说完一句话时自动附一张画面**，与 PC 端
+`input_bar.py`（「开着的时候每秒抓几次画面，说话结束时自动配一张」）完全一致。
+
+好处：摄像头不会一直开着（指示灯常亮是隐私问题），也不费流量。
+
+协议上给 `audio` 消息加了可选的 `image` 字段，服务端 `_do_audio`
+**透传**给 `_do_chat`（`_do_chat` 本来就支持 `image`，只是之前没透传）。
+
+**【实测】** `对话 3.29s (带图=True) -> HAPPY`，她的回复
+「看到啦看到啦～主人戴着眼镜，头发翘起来一点点，好可爱☆」
+—— 确实读到了画面内容，不是空壳。
+
+#### 5.9.8 水印开关
+
+模型说明第 4 条：「水印按键默认打开，需在设置表情中关闭」——
+即作者**明确允许关闭**，不是授权问题。
+
+水印是几行叠字（模型所属 / 禁止商用 / Non-commercial use only 等），
+由 `Param137` 控制，实测标定：
+
+| Param137 | 画面纯白像素 | 水印 |
+| --- | --- | --- |
+| `1` | 8 | **隐藏** |
+| `0` | 1897 ~ 2781 | **显示** |
+
+模型自然状态就是 `0`，也就是**水印默认显示** —— 正对应说明第 4 条。
+
+**不要用「水印」表情来控制**：那个 `.exp3.json` 只是把 `Param137` 加 1，
+而表情在切换情绪时会被整体重置，水印就会重新冒出来；而且实测
+`model.expression([...])` 传**数组**时它并不生效（**字符串**形式才生效），
+想跟情绪表情叠加也做不到。所以直接像口型那样在 `beforeModelUpdate` 里
+驱动参数，最可靠、也没有淡入延迟。
+
+**判定方法**（这是个可复用的技巧）：水印是纯白文字叠在人物上，
+统计画面中部「接近纯白」的像素数即可，先在已知状态的图上校准
+（显示 ~2000-2800，隐藏 <20），比亮度均值可靠得多。
+
+#### 5.9.9 协议增补
+
+相对 §5.6.3，新增/变更的部分：
+
+```
+客户端 → 服务端
+  {"type":"audio", "data":"<base64 wav>", "image":"<base64 jpeg 可选>", "session_id":…}
+                                          ^^^^^ 视频对话（见 5.9.7）
+
+HTTP
+  GET /model/manifest   → {"files":[{path,size,sha1}], "total_bytes":…}
+```
+
+`/model/manifest` **必须注册在 `add_static("/model/")` 之前**，否则会被静态路由吃掉。
+
+#### 5.9.10 真机实测数据
+
+**渲染**（对比模拟器）：
+
+| | 模拟器（SwiftShader） | iQOO 真机 |
+| --- | --- | --- |
+| 模型加载 | 2838 ms | **213 ms** |
+| 贴图 | 6 × 4096² | 6 × 4096² |
+| Canvas | 3500×8888 | 3500×8888 |
+| parts / params / drawables | 77 / 141 / 440 | 77 / 141 / 440 |
+
+**显存与内存**（`dumpsys meminfo`）：
+
+| 项 | 值 |
+| --- | --- |
+| **GL mtrack** | **560 MB** |
+| EGL mtrack | 52 MB |
+| Graphics 合计 | 627 MB |
+| 应用 TOTAL | 736 MB |
+
+560MB ≈ 6×4096²×4B（402MB）+ mipmap 开销，与理论吻合。
+**真机完全扛住，没有 OOM** —— 这是模拟器测不出来的关键一项
+（模拟器靠 `--ignore-gpu-blocklist --enable-unsafe-swiftshader` 绕过
+Chromium 的 GPU 黑名单，走的是软件渲染，显存表现不代表真机）。
+
+**模型同步**：23 个文件 / 34MB，经 USB 隧道 **1.8 秒**下完，二次同步跳过 23 个。
+
+**设备**：Android 16 (SDK 36) · arm64-v8a · 1260×2800 @ 560dpi（CSS 360×800）
+· 内存 11.7GB · WebView 138.0.7204.179。
+
+#### 5.9.11 联调手法
+
+真机上 **`adb shell input tap` 打不中 WebView 里的 HTML 控件**（拿不到焦点），
+所以端到端测试改用 **WebView DevTools 协议**直接在页面上下文里执行 JS：
+
+```bash
+adb forward tcp:9222 localabstract:webview_devtools_remote_$(adb shell pidof com.mikuagent.pet)
+# 连 ws://127.0.0.1:9222 的 webSocketDebuggerUrl，发 Runtime.evaluate
+```
+
+另外 **`adb reverse tcp:8765 tcp:8765`** 能把手机的 8765 反向映射到 PC，
+让手机用 `127.0.0.1` 访问服务端 —— **完全绕开 WiFi、路由器隔离和防火墙**，
+比要求同一个 WiFi 稳得多。
+
+---
+
+### 5.10 每日会话：三端共享同一条对话线（**已完成**）
+
+**需求**：在桌面聊完，切到手机能接上同一个话题。
+
+#### 5.10.1 设计
+
+**每天一个会话，桌面 / 手机 / 网页共享。**
+
+会话**只由日期决定**，客户端无权选择 —— 这一条是实测逼出来的，见 5.10.3。
+
+```python
+# backend/memory.py
+def get_or_create_today() -> dict   # 今天最近活跃的会话，没有才新建（标题=当天日期）
+def resolve_session(preferred_id=None) -> dict   # 三端唯一入口，preferred_id 故意不参与选择
+```
+
+`backend/agent.py` 的 `chat()` 用 `resolve_session()` 解析会话。
+**`agent.chat` 是三端唯一的对话入口**（只有 `chat_worker` / `remote_server` /
+`diag_vision` 三个调用方），所以在这里解析就覆盖了全部路径，
+**Android 和网页端一行都不用改**。
+
+跨天纠正也只发生在这一处：客户端跨零点还缓存着昨天的 id、
+或桌面端连续运行过了午夜，都会被自动换到今天的会话。
+
+#### 5.10.2 为什么用 `created_at` 前缀而不是加 `day` 字段
+
+加字段要写数据迁移，而 `created_at` 本来就是本地时间字符串
+（`memory._now()` 用 `datetime.now()`），`substr(created_at,1,10) = today`
+足够且零风险。排序沿用 `list_sessions()` 的
+`COALESCE(MAX(m.created_at), s.created_at) DESC`，保证两处「最近」的定义一致。
+
+#### 5.10.3 踩过的坑：客户端指定会话会导致**永久分裂**
+
+最初的规则是「`preferred_id` 只要是今天的就沿用」。真实库上实测：
+
+```
+桌面(None)   -> #22     get_or_create_today 取最近活跃
+手机(#23)    -> #23     因为是「今天的」就被沿用，钉住了自己那条
+```
+
+当天有 11 条改动前分裂出的碎片会话，于是**手机在 #23、桌面在 #22，
+跨设备永远接不上** —— 恰好把需求做没了。
+
+所以规则收紧成：**会话只由日期决定**，`preferred_id` 只为签名稳定保留。
+效果：无论谁先开口都落进同一条，另一端的下一条也会被带过来，从此收敛。
+
+#### 5.10.4 验证
+
+**脚本级**（临时库，15 条断言）：幂等 / 昨天的会话不会被返回 /
+跨天纠正（昨天的 id、`None`、不存在的 id、字符串 id）/
+**同一天多条时客户端指定的 id 不能把它钉在另一条上** /
+三端解析结果完全一致 / 空库 / 不新建多余会话。
+
+**真实库**上五种客户端场景全部收敛到同一条：
+
+```
+桌面(None) / 手机(昨天的) / 手机(今天的) / 网页(垃圾值) / 手机(字符串)  ->  都是 #22
+```
+
+**跨端验收**（按 `RemoteClient` 的协议实发一条，故意带过期 id=8）：
+
+```
+桌面端会用 #22，服务端回用 #22，新增消息落在 #22，未新建会话，过期 id 被忽略
+```
+
+> **遗留**：`data/` 里 09-14 有 11 条改动前分裂出的碎片会话（多为测试产生）。
+> 本改动只保证**今后**每天新建一条，并取最近活跃那条继续；
+> 不合并也不删除用户数据。
+
+---
+
 ## 6. 附录
 
 ### 6.1 工具清单
@@ -1684,6 +2062,19 @@ python tools/test_bubble_scroll.py
 | `tools/test_bubble_scroll.py` | 气泡长文本滚动 + `parse_emotion` 标签清理 + 自动隐藏取消 |
 | `tools/test_bubble_align.py` | 气泡下沿与模型始终对齐 + 角标按钮跟随气泡（真实 PetWindow） |
 
+**Android / 协议相关（本轮新增）**
+
+| 工具 / 脚本 | 用途 |
+| --- | --- |
+| `.tmp/cdp_chat.py` | 经 WebView DevTools 协议驱动页面执行 JS（真机上点击打不中 WebView 控件，见 §5.9.11） |
+| `.tmp/test_daily_session.py` | 每日会话的 15 条断言（用临时库，不碰真实数据） |
+| `.tmp/check_real_today.py` | 在真实库上确认「今天会接到哪条会话」与三端解析是否一致 |
+| `.tmp/test_cross_device.py` | 跨端验收：按手机端协议实发一条，断言与桌面端落到同一条会话 |
+
+> 说明：上面四个放在 `.tmp/`（已被 gitignore）。它们依赖本机环境
+> （`adb forward`、运行中的桌宠），不像 `tools/` 里的脚本那样自包含，
+> 所以没有提升成正式工具。要复现时按 §5.9.11 的命令准备环境。
+
 ### 6.2 本会话踩过的坑（按代价排序）
 
 | 坑 | 现象 | 根因 | 修法 |
@@ -1698,6 +2089,28 @@ python tools/test_bubble_scroll.py
 | **托盘僵尸进程** | Alt+F4 后进程不退 | `setQuitOnLastWindowClosed(False)` | `closeEvent` 里显式 `quit()` |
 | **窗口尺寸无效** | 改了 `config.py` 窗口还是旧尺寸 | `.env` 覆盖了默认值 | 同步改 `.env` |
 | **内存耗尽** | NVIDIA 驱动失联、系统降级 | 测量脚本在单进程内连跑 4 个模型配置 | 加内存守卫、一次一个配置 |
+
+**Android / 远程服务（本轮新增，按代价排序）**
+
+| 坑 | 现象 | 根因 | 修法 |
+| --- | --- | --- | --- |
+| **音源采到静音** | 语音输入一直「转写中」，服务端每次返回空字符串 | `AudioSource.VOICE_RECOGNITION` 在 vivo/iQOO 上采到近乎静音（峰值 0.011） | 换成标准 `MIC`（峰值 0.769）。**必须打电平日志才能看出来**，否则录音/上传全都是成功的 |
+| **发送大消息即断连** | 文字聊天完全正常，一发语音服务端就报 `Received frame with non-zero reserved bits` 并断开 | aiohttp 的 `WebSocketResponse` 默认 `compress=True`，握手广告 `permessage-deflate`，而 OkHttp 不实现该扩展 | `WebSocketResponse(..., compress=False)` |
+| **模型同步并发竞争** | 真机上同步报「落盘失败」，模型缺一个文件 | `onCreate` 与 WS 就绪两处并发触发同步，两个线程写同一个 `.part` | 单飞锁 + 临时文件名带线程 id 与时间戳；`Files.move(REPLACE_EXISTING)` 替代 `renameTo` |
+| **WS 切换地址开两条连接** | 服务端看到同一个 App 占两条连接，消息收两份、重复说话 | 旧 socket 的异步 `onFailure` 晚于新 `connect()` 到达，把新连接引用清掉并再调度一次重连 | 引入「代次令牌」，过期回调直接作废；换地址时先关旧连接 |
+| **模型右侧被裁 / 脚下被输入栏挡** | 美术超出可视区，左边却留一大片空白 | 用 `getLocalBounds()`（**画布** 3500×8888）适配，而美术宽 4375、且角色在画布内不居中 | 遍历 drawable 顶点求**美术**包围盒再适配（§5.9.4） |
+| **口型参数看起来恒为 0** | 参数在帧外读永远是快照值，误判成「没生效」 | 每帧末尾 `loadParameters()` 会把参数还原 | 写在 `beforeModelUpdate`；**验证必须用帧内只读探针**（§5.9.5） |
+| **`expression([...])` 数组形式不生效** | 想叠加水印与情绪表情，结果水印反而露出来了 | 数组形式实测无效，**字符串**形式才有效；且表情每次调用会重置参数 | 水印改为直接驱动 `Param137`，不走表情系统（§5.9.8） |
+| **热切换记录查不到** | 用户明明在运行中切换了 STT，日志里一条都没有 | 模块里的 `print` 没带 `flush`，stdout 重定向到文件后是**块缓冲**（8KB），信息卡在缓冲区 | `main.py` 里统一 `sys.stdout.reconfigure(line_buffering=True)` |
+| **交互日志不落盘** | `remote.log` 65 行全是启动播报、交互 0 条，而手机其实已聊上 | `_do_chat` / `_do_audio` 只 `print`（stdout），写文件的是另一个 `_write_log()`；`start.bat` 用 `pythonw.exe` 没有控制台 | `_log()` 同时写控制台与文件 |
+| **`/health` 的 vision 恒为 true** | 没开视频对话也报 `vision: true` | 写成了 `bool(config.VISION_ENABLED or True)` —— `x or True` 恒为真 | `bool(config.VISION_ENABLED)` |
+| **Miku 让手机用户点不存在的按钮** | 手机端问「你看得到我吗」，她回「点一下 📹 就好啦」，但手机底部只有 📷/🎤/➤ | `persona.py` 把 PC 的按钮硬编码进了提示词 | `build_system_prompt` 增加 `platform` 参数，远程路径传 `phone` |
+| **状态永远停在「转写中…」** | 界面看起来像卡死，其实一切正常 | `onReply` 里根本没有 `setStatus`，状态机缺了一环 | 补齐 `录音中→转写中→思考中→说话中→已就绪`，并新增原生 `onSpeechEnd` 回调 |
+| **长按麦克风会打断录音** | 长按弹出文字选择手柄，录音中断 | 长按被 WebView 当成「选中文字」；且原用 `pointerleave` 结束录音，手指滑出按钮就停 | CSS 禁选 + 吃掉 `contextmenu`/`selectstart`；改用 `setPointerCapture` |
+| **长回复挡住模型的头** | 气泡最多占 34vh，把模型压在底下 | 布局的上方留白**写死** 38px | `layout()` 改为读气泡实际 `bottom` 作为留白，显示/隐藏时重新布局 |
+| **开发机内存不够导致模拟器 ANR** | Android 的 system_server 被饿死，弹「Process system isn't responding」 | 页面文件被**固定 16GB 且非系统管理**，提交上限锁死 31.7GB；且 STT 模块级 `import faster_whisper` 会拉进 torch，torch 在有 CUDA 的机器上预留巨量地址空间（**提交 2905MB 而工作集只有 428MB**） | 改惰性导入（提交量 2905→673MB）；构建前先停模拟器；根治要管理员调大页面文件 |
+| **模拟器 WebGL 被黑名单** | `WebGL1 blocklisted`，PIXI 报 `WebGL unsupported` | Chromium 把模拟器的 GPU 拉进黑名单（**真机不受影响**） | `adb shell "echo '_ --ignore-gpu-blocklist --enable-unsafe-swiftshader' > /data/local/tmp/webview-command-line"` |
+| **`adb shell input tap` 打不中 WebView 控件** | 输入框拿不到焦点、字符丢失 | WebView 内的 HTML 控件不接收这种方式的事件 | 改用 WebView DevTools 协议执行 JS（§5.9.11） |
 
 ### 6.3 参考项目笔记
 
@@ -1841,13 +2254,45 @@ python tools/test_bubble_scroll.py
 初音未来的音色与形象归 **Crypton Future Media** 所有。
 参考音频 `assets/voice/` 已在 `.gitignore` 中，**不随仓库分发**。
 
+#### 6.5.1 当前使用的新模型（`models/miku_v5/`）
+
+来源：用户提供的 `D:\game\miku`。模型自带的《模型使用说明》要点：
+
+| 条款 | 内容 |
+| --- | --- |
+| 绘制 / 建模 | 人物绘制：玄宝酱 · 人物建模：怂怂koe |
+| 允许用途 | 可免费作为**桌宠**或 VTS 面捕使用 |
+| **1** | **不可二传二改** |
+| **2** | 严禁商用、严禁直播牟利、严禁违法 |
+| **3** | 文件为 Live2D 运行文件，需自行下载 VTube Studio 才可使用 |
+| **4** | **水印按键默认打开，需在设置表情中关闭** |
+| **5** | 非商用发表视频请表明出处 |
+
+**本项目的合规做法【代码】**：
+
+- **不打进 APK、不提交进 git** —— `.gitignore` 里的 `models/`
+  （已用 `git ls-files` 与全量历史双向确认过没有任何模型文件被跟踪）
+- 改为运行时由 PC 经 `/model/manifest` + 逐文件 sha1 校验下发到手机私有目录
+- 第 4 条的水印开关已实现（§5.9.8）。**默认取「隐藏」**：该条同时允许关闭，
+  且用户已明确要求去掉；右上角保留一键恢复的入口
+
+> 模型来源与条款由用户提供，本仓库不代为判断其真实性。
+
+#### 6.5.2 仓库里另有一份旧模型（待确认）
+
 > ⚠️ **待确认**：`assets/live2d/` 下的模型素材目前**随公开仓库分发**。
 > 若其来源包含「不可二传」条款的免费发布（见 6.3 ②），需要移出仓库。
 > 详见 6.3 ② 的说明。
+>
+> 这份是项目最初 clone 下来就存在的素材（`git log --diff-filter=A` 指向
+> 迁移为原生桌宠那次提交），**不是本轮引入的**。当前**桌面端仍在用它**
+> （旧模型 moc3 v4，单张贴图），新模型只用在手机端 —— 两者通过
+> `REMOTE_MODEL_DIR` 解耦，因为 `ui/live2d_view.py` 的动作/表情/参数映射
+> 是照着旧模型硬编码的。
 
 模型素材的使用请遵守 Live2D 的许可协议与各发布方的授权条款。
 本项目的相关代码仅供本机个人学习。
 
 ---
 
-*文档基线：视频对话功能（提交 `38a5922`）之后的版本*
+*文档基线：每日会话（提交 `061d47c`）之后的版本*
