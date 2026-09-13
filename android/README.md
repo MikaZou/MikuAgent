@@ -200,6 +200,55 @@ handler 做实验，它注册在真正的写入器之后，把口型永久盖成
 写进去的值会先被 `motionManager.update()` 覆盖、再被 `saveParameters()` 存成快照，
 时机不可控。`beforeModelUpdate` 是最后一个写入点，写了必定被本帧绘制采用。
 
+### 坑 5：美术会超出画布，按画布适配必然被裁
+
+**症状**：模型右侧被切掉一截、顶部也贴边、脚下被输入栏挡住，左边却留一大片空白。
+
+**根因**：我一直拿 `model.getLocalBounds()` 的返回值（**画布** 3500×8888）
+去做适配和居中。但这个模型的美术**超出了画布范围**（长发），而且角色在画布内
+并不居中。按画布适配 → 超出画布的部分被屏幕裁掉。
+
+实测（`getDrawableVertices` 遍历 440 个 drawable 求并集）：
+
+| | 画布坐标 | 换成 CSS |
+|---|---|---|
+| 美术 X | 782 ~ 5158 | 宽 **4375**（画布只有 3500） |
+| 美术 Y | −91 ~ 8898 | 高 **8989**（画布 8888） |
+
+美术比画布宽 875px、高 101px。屏幕只有 412 CSS 宽，按画布缩放后美术宽 437 CSS
+——**必然右边被裁**。
+
+**换算关系**（`getDrawableVertices` 返回的不是画布像素）：
+
+```js
+const ppu = model.internalModel.width / core.getCanvasWidth();   // 3500 / 0.7415 = 4720
+const canvasX = model.internalModel.width  / 2 + vx * ppu;       // 原点在画布中心
+const canvasY = model.internalModel.height / 2 + vy * ppu;
+```
+
+**修法**：按**美术包围盒**缩放并把它的中心对齐到可用区中心，可用区要避开
+顶部状态条与底部输入栏：
+
+```js
+const padX = 10, topPad = 38, bottomPad = 86;
+const s = Math.min((w - 2*padX) / artW, (h - topPad - bottomPad) / artH);
+model.position.set(centerX - artCenterX * s, centerY - artCenterY * s);
+```
+
+**效果**（像素级实测，截屏后扫非背景像素求包围盒）：
+
+| | 修复前 | 修复后 |
+|---|---|---|
+| 右侧被裁 | 是 | **否** |
+| 顶部被裁 | 是 | **否** |
+| 下边距 | 1px（贴住输入栏） | 34px |
+| 左右边距差 | 289px | **70px** |
+| 占屏宽 | 73.1% | 86.8% |
+
+> 副作用：美术包围盒只在加载时量一次，而待机动画会让姿态变化，
+> 所以左右会残留几十像素的不对称（1080px 上约 70px，视觉上可接受）。
+> 想更精确可以每隔若干秒重量一次，但要遍历 440 个 drawable，当前不值当。
+
 ## 排查
 
 ```bash

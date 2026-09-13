@@ -243,35 +243,82 @@ function reportFail(msg) {
   native && native.failed && native.failed(msg);
 }
 
-// 模型的本地包围盒，只算一次。用它来定位，就不必猜 anchor / 原点的语义 ——
-// 我在这上面猜错过两次：加 anchor 只看到下半身，去掉 anchor 又跑到屏幕右边。
-let modelBounds = null;
+// 模型美术的真实包围盒，只算一次。
+//
+// 为什么不能用 getLocalBounds()：那个返回的是**画布**（3500x8888），
+// 但这个模型的美术**超出了画布范围**（长发等），而且角色在画布内也不居中。
+// 按画布适配的后果实测就是：右侧被裁掉一截、左边留一大片空白。
+//
+// getDrawableVertices() 返回的是「画布像素 / PixelsPerUnit」单位的坐标，
+// 且原点在**画布中心**，所以要换算回画布像素：
+//     canvasX = CanvasWidth/2 + vx * PixelsPerUnit
+let artBox = null;   // 单位：画布像素
+
+function measureArtBounds() {
+  const cw = model.internalModel.width;    // 画布像素宽（3500）
+  const ch = model.internalModel.height;   // 画布像素高（8888）
+  const unitsW = core.getCanvasWidth();    // 同一画布的「单位」宽（约 0.7415）
+  if (!(unitsW > 0)) return null;
+  const ppu = cw / unitsW;                 // 4720
+  const ox = cw / 2, oy = ch / 2;          // 画布原点在中心
+
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  const n = core.getDrawableCount();
+  for (let i = 0; i < n; i++) {
+    let v;
+    try { v = core.getDrawableVertices(i); } catch (e) { continue; }
+    if (!v || !v.length) continue;
+    for (let k = 0; k < v.length; k += 2) {
+      const x = ox + v[k] * ppu;
+      const y = oy + v[k + 1] * ppu;
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+    }
+  }
+  if (!isFinite(minX) || maxX <= minX) return null;
+  console.log("ART_BOUNDS " + JSON.stringify({
+    x: [Math.round(minX), Math.round(maxX)], y: [Math.round(minY), Math.round(maxY)],
+    w: Math.round(maxX - minX), h: Math.round(maxY - minY),
+    canvas: [cw, ch], ppu: Math.round(ppu),
+  }));
+  return { minX, maxX, minY, maxY };
+}
 
 function layout() {
   if (!model || !app) return;
   const w = app.renderer.width / app.renderer.resolution;
   const h = app.renderer.height / app.renderer.resolution;
 
-  if (!modelBounds) {
-    // 先在"单位变换"下量一次真实包围盒
-    model.scale.set(1);
-    model.position.set(0, 0);
-    const b = model.getLocalBounds();
-    modelBounds = { x: b.x, y: b.y, width: b.width, height: b.height };
-    console.log("LOCAL_BOUNDS " + JSON.stringify(modelBounds));
-  }
-  if (!(modelBounds.width > 0) || !(modelBounds.height > 0)) return;
+  if (!artBox) artBox = measureArtBounds();
+  if (!artBox) return;
 
-  const s = Math.min(w / modelBounds.width, h / modelBounds.height);
+  // 可用区域：避开顶部状态条与底部输入栏
+  const padX = 10, topPad = 38, bottomPad = 86;
+  const availX0 = padX, availX1 = w - padX;
+  const availY0 = topPad, availY1 = h - bottomPad;
+  const availW = Math.max(1, availX1 - availX0);
+  const availH = Math.max(1, availY1 - availY0);
+
+  // 按**美术**尺寸缩放，而不是画布尺寸
+  const artW = artBox.maxX - artBox.minX;
+  const artH = artBox.maxY - artBox.minY;
+  const s = Math.min(availW / artW, availH / artH);
   model.scale.set(s);
-  // 把包围盒的**中心**对齐到屏幕中心
+
+  // 让美术包围盒的中心落在可用区中心
+  const artCx = (artBox.minX + artBox.maxX) / 2;
+  const artCy = (artBox.minY + artBox.maxY) / 2;
   model.position.set(
-    w / 2 - (modelBounds.x + modelBounds.width / 2) * s,
-    h / 2 - (modelBounds.y + modelBounds.height / 2) * s,
+    (availX0 + availX1) / 2 - artCx * s,
+    (availY0 + availY1) / 2 - artCy * s,
   );
+
   console.log("LAYOUT s=" + s.toFixed(4) +
-              " pos=" + Math.round(model.position.x) + "," + Math.round(model.position.y) +
-              " screen=" + Math.round(w) + "x" + Math.round(h));
+    " artCss=" + Math.round(artW * s) + "x" + Math.round(artH * s) +
+    " avail=" + Math.round(availW) + "x" + Math.round(availH) +
+    " screen=" + Math.round(w) + "x" + Math.round(h));
 }
 
 /** 直接写参数，找不到就静默跳过（不同模型参数名可能不同）。 */
