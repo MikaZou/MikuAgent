@@ -207,6 +207,9 @@ async function loadModel() {
     // 模型要求水印默认打开
     DEFAULT_EXPRESSIONS.forEach((n) => applyExpression(n));
 
+    // 挂参数写入器（口型 / 情绪倾角）—— 必须在模型加载后
+    bindParamWriter();
+
     model.on("pointertap", () => {
       try { model.motion(["Idle","Tap","Flick","FlickUp","Dance"][Math.floor(Math.random()*5)]); }
       catch (e) { /* 该模型 motion3 只有一条，失败不影响渲染 */ }
@@ -284,20 +287,35 @@ function setParam(id, value) {
 }
 
 let tiltTarget = 0, tiltNow = 0, mouthNow = 0;
-function tickParams() {
-  if (core) {
-    // 口型：原生侧按真实播放进度算好的 RMS 包络
+window.__mouth = 0;
+
+/**
+ * 参数必须在 **beforeModelUpdate** 里写，不能放在 requestAnimationFrame 里。
+ *
+ * 踩过的坑：原先用 rAF 循环写 ParamMouthOpenY，实测该参数**恒为 0**
+ * （860 次采样全零）—— 因为 Live2D 的 internalModel.update() 每帧会重算参数，
+ * 把 rAF 里写的值覆盖掉。挂在 beforeModelUpdate 上的时机正好是
+ * 「动作更新之后、coreModel.update() 算顶点之前」，写了才会真正生效。
+ *
+ * 事件名是运行时探测出来的（拦截 emit 记录），不是照文档猜的。
+ */
+function bindParamWriter() {
+  if (!model || !model.internalModel || typeof model.internalModel.on !== "function") {
+    console.warn("internalModel 不支持事件钩子，口型无法驱动");
+    return;
+  }
+  model.internalModel.on("beforeModelUpdate", () => {
+    // 口型：原生侧按**真实播放进度**（AudioTrack.playbackHeadPosition）算好的 RMS 包络。
+    // 上升快、下降慢，观感更像说话而不是抽搐。
     mouthNow += (mouthNow < window.__mouth ? 0.55 : 0.25) * (window.__mouth - mouthNow);
     setParam("ParamMouthOpenY", mouthNow);
     // 头部微倾，表情绪
     tiltNow += (tiltTarget - tiltNow) * 0.12;
     setParam("ParamAngleZ", tiltNow);
     setParam("ParamBodyAngleZ", tiltNow * 0.35);
-  }
-  requestAnimationFrame(tickParams);
+  });
+  console.log("参数写入器已挂到 beforeModelUpdate");
 }
-window.__mouth = 0;
-requestAnimationFrame(tickParams);
 
 // ---------------------------------------------------- 暴露给原生的 API
 window.Miku = {

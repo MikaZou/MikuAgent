@@ -166,10 +166,44 @@ system_server 被饿死，弹「Process system isn't responding」。
    服务端提交量从 2905MB 降到 673MB
 3. 根治要**以管理员身份**把页面文件改成「系统管理」或调大上限，然后重启
 
+### 坑 4：Live2D 参数每帧会被 `loadParameters()` 还原 —— 口型参数怎么测
+
+这是本项目最隐蔽的一个坑，我连续**测错两次**才弄明白。
+
+pixi-live2d-display 的 `InternalModel.update()` 实际顺序（从压缩后的
+`cubism4.min.js` 里读出来的，不是猜的）：
+
+```js
+emit("afterMotionUpdate");
+coreModel.saveParameters();        // 存参数快照
+... expression / eyeBlink / physics / pose 依次更新 ...
+emit("beforeModelUpdate");         // ← 写自定义参数的正确位置
+coreModel.update();                // ← 用刚写的值算顶点并绘制
+coreModel.loadParameters();        // ★ 载回快照，把刚写的值抹掉
+```
+
+推论有两条，都很反直觉：
+
+1. **写在 `beforeModelUpdate` 里的值会被正常绘制**，但**帧与帧之间读不到** ——
+   每帧末尾都被 `loadParameters()` 还原了。所以「在帧外读参数」永远读到快照值，
+   会让你误判成「参数没生效」。
+2. **正确的验证方法**是注册一个同样挂在 `beforeModelUpdate` 的探针，
+   **在帧内读**（且探针必须注册在写入器之后、且自己不能写参数）。
+   实测结果：绘制用的口型值 469 帧内范围 0~0.59、69 个不同值，
+   与原生包络（0~0.611、134 个不同值）跟随良好。
+
+顺带一条：**不要把验证用的临时 handler 留在页面里**。我曾用一个写死 0.33 的
+handler 做实验，它注册在真正的写入器之后，把口型永久盖成 0.33，
+看起来就像「口型坏了」。重启 App 才清掉。
+
+**别用 `requestAnimationFrame` 写参数**：rAF 的回调落在帧间，
+写进去的值会先被 `motionManager.update()` 覆盖、再被 `saveParameters()` 存成快照，
+时机不可控。`beforeModelUpdate` 是最后一个写入点，写了必定被本帧绘制采用。
+
 ## 排查
 
 ```bash
-adb logcat -s MikuAgent:* MikuJS:* AssetServer:* RemoteClient:* ModelSync:* AudioCapture:*
+adb logcat -s MikuAgent:* MikuJS:* AssetServer:* RemoteClient:* ModelSync:* AudioCapture:* PhotoTaker:*
 ```
 
 关键行：
@@ -195,6 +229,8 @@ PC 侧同一时刻的交互记录在 `data/remote.log`（对话 / 语音 / 转�
 | 文字对话 + 情绪 | 气泡「晚上好呀主人～ミクです！☆…」`chip=开心` |
 | 语音上传转写 | `语音转写 1.56s`（模拟器无真实麦克风，采到静音属预期） |
 | 拍照 + 视觉对话 | `onCaptureSuccess 1920x1440` → `对话 3.29s (带图=True)`，Miku 回复「你是自己画的吗？还是从哪个游戏里截的呀」 |
+| **口型同步** | 帧内探针实测：绘制用口型值 469 帧内 0~0.59 / 69 个不同值，与原生 RMS 包络同步（见「坑 4」的测法） |
+| 表情 | 8 个表情已注入 model3.json 的内存副本（圈圈/脸红/前倾/葱/唱歌/比心/QQ人/水印），`model.expression('比心')` 调用成功 |
 
 `data/remote.log` 里「对话 / 语音 / 转写」记录从 **0 条**变为有记录。
 
