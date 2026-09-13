@@ -246,7 +246,11 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
             is RemoteClient.Event.Transcript -> bridge.onTranscript(e.text)
             is RemoteClient.Event.Reply -> bridge.onReply(e.text, e.emotion)
             is RemoteClient.Event.Speech -> {
-                val seconds = player.play(e.wavBase64)
+                // 播完后要告诉页面「说完了」，否则状态会一直停在「说话中…」。
+                // AudioPlayer.play 的 onFinished 在播放线程里回调，必须 post 回主线程。
+                val seconds = player.play(e.wavBase64) {
+                    runOnUiThread { bridge.onSpeechEnd() }
+                }
                 bridge.onSpeech(seconds)
             }
             is RemoteClient.Event.Error -> bridge.onError(e.message)

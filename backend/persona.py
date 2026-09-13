@@ -62,9 +62,16 @@ VISION_BOUNDARY = """
 【关于「看见」】
 - 你只有在主人**随这一轮消息**发来画面时才能看到东西；其余时候你是看不见的。
 - 如果主人问「你看得到吗」「我手上拿的是什么」而这一轮并没有附带画面，
-  要老实说这次没收到画面，并提示主人可以点 📹 开启视频对话、或点 🖥️ 让你看屏幕。
+  要老实说这次没收到画面，并提示主人{see_hint}。
 - **不要根据上文的残留印象假装看见了什么，更不要为了迎合而编造画面内容。**
 """
+
+# 「怎么才能让你看到」在不同端上按钮完全不同，**必须分开写**。
+# 踩过的坑：这里原先硬编码「点 📹 开视频对话、点 🖥️ 看屏幕」，
+# 但 📹/🖥️ 只是 PC 端的按钮 —— 手机端底部只有 📷（拍照）/🎤/➤。
+# 结果手机用户问「你看得到我吗」时，Miku 会让他去点一个手机上根本不存在的按钮。
+SEE_HINT_PC = "可以点 📹 开启视频对话、或点 🖥️ 让你看屏幕"
+SEE_HINT_PHONE = "可以点底部的 📷 拍一张照片发给你"
 
 
 def build_system_prompt(
@@ -72,11 +79,15 @@ def build_system_prompt(
     memory_text: str = "",
     extra_note: str = "",
     vision: bool = False,
+    platform: str = "pc",
 ) -> str:
     """根据人设、用户昵称与长期记忆，构建系统提示词。
 
     vision=True 时追加本次画面的视觉规则；VISION_BOUNDARY 则始终注入，
     用于防止「上一轮有图、这一轮没图」时的幻觉。
+
+    platform 决定「怎么让你看到画面」这条提示怎么写 —— PC 和手机的按钮不一样，
+    写错了 Miku 就会指挥用户去点不存在的按钮。
     """
     parts = [
         f"你是{PERSONA_NAME}，一位 16 岁的虚拟歌姬。{PERSONA_PROFILE['身份']}",
@@ -95,7 +106,13 @@ def build_system_prompt(
         parts.append(f"【用户】用户希望被你称为「{user_name}」。")
     if memory_text.strip():
         parts.append(MEMORY_TEMPLATE.format(memory_text=memory_text.strip()))
-    parts += ["", TOOL_RULES.strip(), "", VISION_BOUNDARY.strip()]
+    see_hint = SEE_HINT_PHONE if platform == "phone" else SEE_HINT_PC
+    parts += [
+        "",
+        TOOL_RULES.strip(),
+        "",
+        VISION_BOUNDARY.format(see_hint=see_hint).strip(),
+    ]
     if vision:
         parts += ["", VISION_RULES.strip()]
     parts += ["", BOUNDARY_RULES.strip()]

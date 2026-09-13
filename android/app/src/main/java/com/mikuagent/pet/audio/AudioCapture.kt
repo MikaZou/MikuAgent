@@ -41,8 +41,15 @@ class AudioCapture {
         if (minBuf <= 0) return "设备不支持 ${SAMPLE_RATE}Hz 单声道录音"
 
         val rec = try {
+            // 音源用 MIC，**不要**用 VOICE_RECOGNITION。
+            //
+            // VOICE_RECOGNITION 名义上更适合 ASR（少做处理），但 vivo/iQOO 上
+            // 实测采到的是**近乎静音**：峰值 0.011、RMS 0.0023（正常说话
+            // 峰值 0.1~0.9、RMS 0.02~0.1，差一到两个数量级），于是云端转写
+            // 每次都返回空字符串，界面上只表现为「说完没反应」。
+            // 这种坑从 App 侧完全看不出来，是服务端打印电平才定位到的。
             AudioRecord(
-                MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                MediaRecorder.AudioSource.MIC,
                 SAMPLE_RATE, CHANNEL, ENCODING,
                 minBuf * 2,
             )
@@ -98,11 +105,32 @@ class AudioCapture {
 
         val data = synchronized(pcm) { pcm.toByteArray() }
         val seconds = data.size.toDouble() / (SAMPLE_RATE * 2)
+
+        // 采完立刻算一次电平：真机排查时这是最有用的一行 —— 只有它能把
+        // 「麦克风没收到声音」和「音频格式不对」区分开（两者在界面上都表现为
+        // 「说完没反应」）。服务端也会算一遍，两边对照能定位是哪一段出的问题。
+        var peak = 0
+        var i = 0
+        while (i + 1 < data.size) {
+            val v = ((data[i].toInt() and 0xFF) or (data[i + 1].toInt() shl 8)).toShort().toInt()
+            val a = if (v < 0) -v else v
+            if (a > peak) peak = a
+            i += 2
+        }
+        val peakF = peak / 32768.0
+        val level = when {
+            peakF < 0.02 -> "静音!"
+            peakF < 0.10 -> "偏小(%.3f)".format(peakF)
+            else -> "正常(%.3f)".format(peakF)
+        }
+
         if (seconds < MIN_SECONDS) {
             Log.i(TAG, "录音太短（${"%.2f".format(seconds)}s），丢弃")
             return null
         }
-        Log.i(TAG, "录音结束 ${"%.2f".format(seconds)}s / ${data.size / 1024}KB")
+        Log.i(TAG, "录音结束 ${"%.2f".format(seconds)}s / ${data.size / 1024}KB  电平=$level")
+        // 本地就能看出「是不是白录了」，不必等服务端日志
+        if (level == "静音!") Log.w(TAG, "录音电平极低，麦克风可能没采到声音（音源/权限/被占用）")
         return Base64.encodeToString(wrapWav(data), Base64.NO_WRAP) to seconds
     }
 

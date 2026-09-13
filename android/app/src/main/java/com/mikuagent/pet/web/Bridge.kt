@@ -120,6 +120,9 @@ class Bridge(
     fun onProvider(json: String) =
         callJs("window.Miku && Miku.onProvider($json)")
 
+    /** 语音播完了，让页面把状态收回「已就绪」。 */
+    fun onSpeechEnd() = callJs("window.Miku && Miku.onSpeechEnd && Miku.onSpeechEnd()")
+
     fun onError(message: String) =
         callJs("window.Miku && Miku.onError(${q(message)})")
 

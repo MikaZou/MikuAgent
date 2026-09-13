@@ -287,9 +287,11 @@ class RemoteServer:
                 return
 
         t0 = time.time()
-        # agent / tts 都是阻塞调用，扔到线程池，别堵事件循环
+        # agent / tts 都是阻塞调用，扔到线程池，别堵事件循环。
+        # platform="phone"：手机端的按钮和 PC 不同（只有 📷 拍照，没有 📹/🖥️），
+        # 提示词要跟着变，否则她会指挥手机用户去点不存在的按钮。
         result = await asyncio.to_thread(
-            self.agent.chat, req.get("session_id"), text, image
+            self.agent.chat, req.get("session_id"), text, image, "phone"
         )
         _log(f"{peer} 对话 {time.time()-t0:.2f}s "
              f"(带图={bool(image)}) -> {result.get('emotion')}")
@@ -334,8 +336,35 @@ class RemoteServer:
             return
 
         t0 = time.time()
+        # 诊断：把手机上传的原始音频留一份，并打印电平。
+        # 「转写结果为空」有两种完全不同的原因 —— 麦克风没收到声音，
+        # 还是音频格式/通道不对。不看电平根本分不出来（真机上踩过：
+        # 每次都返回空字符串，界面上只表现为「一直卡在转写中」）。
+        try:
+            import io as _io
+
+            import numpy as np
+            import soundfile as sf
+
+            (config.DATA_DIR / "last_voice.wav").write_bytes(wav_bytes)
+            _d, _r = sf.read(_io.BytesIO(wav_bytes), always_2d=True)
+            _mono = _d.mean(axis=1)
+            _peak = float(np.abs(_mono).max()) if _mono.size else 0.0
+            _rms = float(np.sqrt((_mono.astype("float64") ** 2).mean())) if _mono.size else 0.0
+            _log(
+                f"{peer} 收到语音 {_mono.size / _r:.2f}s @{_r}Hz "
+                f"{'立体声' if _d.shape[1] > 1 else '单声道'} "
+                f"峰值={_peak:.3f} RMS={_rms:.4f}"
+                + ("   ← 几乎是静音，检查手机麦克风权限/占用" if _peak < 0.02 else "")
+            )
+        except Exception as exc:  # noqa: BLE001
+            _log(f"{peer} 音频诊断失败：{exc}")
+
         text = await asyncio.to_thread(self._transcribe_wav, wav_bytes)
-        _log(f"{peer} 语音转写 {time.time()-t0:.2f}s -> {text[:30]!r}")
+        _log(
+            f"{peer} 语音转写 {time.time()-t0:.2f}s -> {text[:30]!r}"
+            + ("   ← 转写为空，已回空文本通知手机端" if not text else "")
+        )
         if not text:
             await ws.send_json({"type": "transcript", "text": ""})
             return

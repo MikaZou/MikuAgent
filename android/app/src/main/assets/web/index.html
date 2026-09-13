@@ -408,10 +408,29 @@ window.Miku = {
     tiltTarget = EMOTION_TILT[emotion] || 0;
     applyExpression(EMOTION_EXPR[emotion] || null);
     showBubble(text, emotion);
+    // 回复到了就回到就绪。原先这里不设状态，于是「转写中…」会一直挂着 ——
+    // 界面看起来像卡死，其实一切正常（真机上被用户当成 bug 报过来）。
+    setStatus("已就绪", "on");
     try { model && model.motion("Idle"); } catch (e) {}
   },
-  onTranscript(text) { if (text) { $("text").value = text; showBubble(text, "NORMAL"); } },
-  onSpeech(seconds) { console.log("speech " + seconds + "s"); },
+  onTranscript(text) {
+    if (text) {
+      $("text").value = text;
+      showBubble(text, "NORMAL");
+      // 后面服务端还会跑一轮 LLM，状态得跟着走，不能停在「转写中」
+      setStatus("思考中…");
+    } else {
+      // 转写为空（没听清 / 麦克风没收到声音）时必须有反馈，
+      // 否则界面会一直停在「转写中…」，用户以为卡死了。
+      setStatus("已就绪", "on");
+      showBubble("唔…没听清，再说一次好不好？", "SAD");
+    }
+  },
+  onSpeech(seconds) {
+    if (seconds > 0) setStatus("说话中…");
+  },
+  // 语音播完由原生回调。没有这个回调的话状态会永远停在「说话中…」。
+  onSpeechEnd() { setStatus("已就绪", "on"); },
   onProvider(json) {
     try {
       const p = JSON.parse(json);
@@ -427,7 +446,11 @@ window.Miku = {
     setStatus(map[state] || state, state === "failed" ? "err" : (state === "connected" ? "on" : ""));
     if (state === "connected") $("setup").classList.add("hide");
   },
-  onError(msg) { showBubble("呜…" + msg, "SAD"); },
+  onError(msg) {
+    // 出错也要把状态复位，否则会停在「转写中…／思考中…」装作还在忙
+    setStatus("已就绪", "on");
+    showBubble("呜…" + msg, "SAD");
+  },
 };
 
 // ---------------------------------------------------------------- 交互

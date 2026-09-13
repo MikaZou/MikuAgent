@@ -180,11 +180,15 @@ class MikuAgent:
         session_id: Optional[int],
         user_message: str,
         image: Optional[bytes] = None,
+        platform: str = "pc",
     ) -> dict:
         """处理一轮对话，返回 {reply, emotion, session_id, mock, session_title}。
 
         image 为 JPEG 字节时走多模态；图片只作用于**当前这一轮**，
         历史里只留文本占位符（不落盘、不入库）。
+
+        platform 为 "phone" 或 "pc"，决定提示词里「怎么让你看到画面」怎么写
+        （两端的按钮不一样，写错她会指挥用户去点不存在的按钮）。
         """
         session = self.memory.get_session(session_id) if session_id else None
         if session is None:
@@ -197,7 +201,10 @@ class MikuAgent:
         )
         user_name = self.memory.get_meta("user_name") or None
         system_prompt = build_system_prompt(
-            user_name=user_name, memory_text=memory_text, vision=bool(image)
+            user_name=user_name,
+            memory_text=memory_text,
+            vision=bool(image),
+            platform=platform,
         )
 
         if not self.live:
