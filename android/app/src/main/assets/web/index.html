@@ -362,10 +362,19 @@ function stopRec() {
 ["pointerup","pointercancel","pointerleave"].forEach(ev =>
   $("mic").addEventListener(ev, (e) => { e.preventDefault(); stopRec(); }));
 
-// 拍照：原生侧拿相机，这里只管把 base64 交给桥
+// 拍照：相机在原生侧（浏览器里 http 拿不到 getUserMedia，原生没这个限制）。
+// 这里只负责按一下，原生拍好后通过 Miku.onPhoto(base64) 回传。
 $("cam").onclick = () => {
-  // Phase 3 只做占位：相机在原生侧实现后通过 Miku.onPhoto(dataUrl) 回传
-  showBubble("拍照功能还在做哦，先用文字和语音陪我聊嘛～", "NORMAL");
+  const err = native.takePhoto();
+  if (err) { showBubble("呜…" + err, "SAD"); return; }
+  setStatus("拍照中…");
+};
+
+window.Miku.onPhoto = (b64) => {
+  pendingImage = b64;
+  $("cam").classList.add("attach");
+  setStatus("已就绪", "on");
+  showBubble("拍好啦～发送时会一起给 Miku 看", "NORMAL");
 };
 
 $("connect").onclick = () => {

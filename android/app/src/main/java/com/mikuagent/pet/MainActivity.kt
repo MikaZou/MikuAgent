@@ -21,6 +21,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import com.mikuagent.pet.audio.AudioCapture
 import com.mikuagent.pet.audio.AudioPlayer
+import com.mikuagent.pet.camera.PhotoTaker
 import com.mikuagent.pet.model.ModelSync
 import com.mikuagent.pet.net.RemoteClient
 import com.mikuagent.pet.web.AssetServer
@@ -54,6 +55,7 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
     private lateinit var player: AudioPlayer
     private lateinit var sync: ModelSync
     private lateinit var prefs: SharedPreferences
+    private lateinit var photoTaker: PhotoTaker
 
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
@@ -70,11 +72,21 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
     /** 待处理的录音权限请求，授权后自动继续 */
     private var pendingRecordAction: (() -> Unit)? = null
 
+    /** 待处理的相机权限请求 */
+    private var pendingPhotoAction: (() -> Unit)? = null
+
     private val recordPermLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             val action = pendingRecordAction
             pendingRecordAction = null
             if (granted) action?.invoke() else bridge.onError("没有麦克风权限，去系统设置里给一下？")
+        }
+
+    private val cameraPermLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            val action = pendingPhotoAction
+            pendingPhotoAction = null
+            if (granted) action?.invoke() else bridge.onError("没有相机权限，去系统设置里给一下？")
         }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -93,6 +105,7 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
         // 口型包络直接喂给页面；30Hz 的频率 evaluateJavascript 扛得住
         player = AudioPlayer { level -> if (pageReady) bridge.onMouth(level) }
         sync = ModelSync(this)
+        photoTaker = PhotoTaker(this, this)
         remote = RemoteClient { event -> onRemoteEvent(event) }
 
         webView = WebView(this).apply {
@@ -278,6 +291,26 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
         remote.ping()
     }
 
+    override fun onTakePhoto(): String {
+        val granted = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
+            PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            pendingPhotoAction = { onTakePhoto() }
+            cameraPermLauncher.launch(Manifest.permission.CAMERA)
+            return ""
+        }
+        photoTaker.take { b64, err ->
+            if (b64 != null) {
+                Log.i(TAG, "拍照完成 ${b64.length / 1024} KB")
+                bridge.onPhoto(b64)
+            } else {
+                Log.w(TAG, "拍照失败: $err")
+                bridge.onError(err ?: "拍照失败")
+            }
+        }
+        return ""
+    }
+
     override fun onPageAlive() {
         Log.i(TAG, "页面脚本就绪（modelReady=$modelReady）")
         pageReady = true
@@ -337,6 +370,7 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
         scope.cancel()
         capture.cancel()
         player.stop()
+        photoTaker.shutdown()
         remote.disconnect()
         webView.destroy()
         super.onDestroy()

@@ -34,6 +34,8 @@ class Bridge(
         fun onStopRecording()
         fun onCancelRecording()
         fun onPing()
+        /** 拍一张照片发给 Miku 看；@return 空串表示已开始（结果异步回传），否则是错误信息 */
+        fun onTakePhoto(): String
         /** 页面脚本**初始化完成**（与「模型渲染成功」是两件事） */
         fun onPageAlive()
         /** 页面自己也需要知道连接状态时用 */
@@ -80,6 +82,13 @@ class Bridge(
     fun ping() = actions.onPing()
 
     @JavascriptInterface
+    fun takePhoto(): String {
+        val err = actions.onTakePhoto()
+        if (err.isNotEmpty()) Log.w(TAG, "拍照失败: $err")
+        return err
+    }
+
+    @JavascriptInterface
     fun ready(info: String) {
         Log.i(TAG, "RENDER_READY $info")
         actions.onPageReady(info)
@@ -113,6 +122,10 @@ class Bridge(
 
     fun onError(message: String) =
         callJs("window.Miku && Miku.onError(${q(message)})")
+
+    /** 照片拍好了（base64 JPEG，不含 data: 前缀），交给页面挂在待发送的图片上。 */
+    fun onPhoto(base64Jpeg: String) =
+        callJs("window.Miku && Miku.onPhoto(${q(base64Jpeg)})")
 
     /**
      * 让页面开始加载模型。
