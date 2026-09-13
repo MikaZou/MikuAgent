@@ -36,6 +36,8 @@ class Bridge(
         fun onPing()
         /** 拍一张照片发给 Miku 看；@return 空串表示已开始（结果异步回传），否则是错误信息 */
         fun onTakePhoto(): String
+        /** 手机端「视频对话」开关：说话时是否自动附一帧画面 */
+        fun onSetVideoMode(on: Boolean)
         /** 页面脚本**初始化完成**（与「模型渲染成功」是两件事） */
         fun onPageAlive()
         /** 页面自己也需要知道连接状态时用 */
@@ -87,6 +89,9 @@ class Bridge(
         if (err.isNotEmpty()) Log.w(TAG, "拍照失败: $err")
         return err
     }
+
+    @JavascriptInterface
+    fun setVideoMode(on: Boolean) = actions.onSetVideoMode(on)
 
     @JavascriptInterface
     fun ready(info: String) {

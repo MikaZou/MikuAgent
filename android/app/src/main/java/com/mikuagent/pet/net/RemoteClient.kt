@@ -188,11 +188,13 @@ class RemoteClient(private val onEvent: (Event) -> Unit) {
         send(o)
     }
 
-    fun sendAudio(wavBase64: String) {
+    /** 上传录音。imageBase64 非空时一起带上（对应 PC 的「视频对话」：说话时附一帧）。 */
+    fun sendAudio(wavBase64: String, imageBase64: String? = null) {
         val o = JSONObject().apply {
             put("type", "audio")
             put("data", wavBase64)
             sessionId?.let { put("session_id", it) }
+            imageBase64?.let { put("image", it) }
         }
         send(o)
     }

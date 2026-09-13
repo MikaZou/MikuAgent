@@ -45,6 +45,18 @@
   }
   #wm.off { border-color: rgba(255,255,255,.18); background: rgba(255,255,255,.06); color: #8b929c; }
 
+  /* 长按不要触发文字选中 / 系统上下文菜单。
+     踩过的坑：按住麦克风说话时，长按会被 WebView 当成「选中文字」，
+     弹出选择手柄并把录音打断。按钮和输入栏整体禁用选择；
+     输入框和气泡要保持可选中/可滚动，所以只对 #bar 生效。 */
+  #bar, #bar *, #wm, #topbar {
+    -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #text { -webkit-user-select: text; user-select: text; }
+  #bubble { -webkit-user-select: text; user-select: text; }
+
   /* 底部输入区 */
   #bar {
     position: fixed; left: 8px; right: 8px; bottom: 8px;
@@ -62,6 +74,7 @@
   .btn.primary { background: #39c5bb; color: #fff; }
   .btn.rec { background: #ef4444; color: #fff; }
   .btn.attach { background: #ffd166; }
+  .btn.on { background: #39c5bb; color: #06231f; }
   .btn:disabled { opacity: .45; }
 
   /* 首次使用：填 PC 地址 */
@@ -93,6 +106,7 @@
 
 <div id="bar">
   <input id="text" placeholder="和 Miku 说点什么…" autocomplete="off">
+  <button class="btn" id="video" title="视频对话：说话时自动拍一张给 Miku 看">📹</button>
   <button class="btn" id="cam" title="拍照">📷</button>
   <button class="btn" id="mic" title="按住说话">🎤</button>
   <button class="btn primary" id="send" title="发送">➤</button>
@@ -201,8 +215,19 @@ function showBubble(text, emotion) {
   const b = $("bubble");
   b.classList.add("show");
   b.scrollTop = 0;      // 新消息从第一句开始读
+  layout();             // 气泡高度变了，模型要让位（否则长回复会挡住头）
 }
-function hideBubble() { $("bubble").classList.remove("show"); }
+function hideBubble() {
+  $("bubble").classList.remove("show");
+  layout();
+}
+
+/** 气泡当前占用的底部位置（没显示时为 0），给 layout() 当上方留白用。 */
+function bubbleBottom() {
+  const b = $("bubble");
+  if (!b || !b.classList.contains("show")) return 0;
+  return b.getBoundingClientRect().bottom;
+}
 
 // ---------------------------------------------------------------- Live2D
 async function loadModel() {
@@ -240,6 +265,9 @@ async function loadModel() {
     // 水印：默认隐藏（用户明确要求去掉）。模型说明第 4 条是「默认打开、
     // 可在表情设置里关闭」—— 这里保留了开关，想恢复显示点右上角即可。
     setWatermark(watermarkHidden);
+
+    // 恢复上次的视频对话开关状态（默认关，和 PC 的默认一致）
+    applyVideoMode();
 
     // 挂参数写入器（口型 / 情绪倾角）—— 必须在模型加载后
     bindParamWriter();
@@ -328,8 +356,12 @@ function layout() {
   if (!artBox) artBox = measureArtBounds();
   if (!artBox) return;
 
-  // 可用区域：避开顶部状态条与底部输入栏
-  const padX = 10, topPad = 38, bottomPad = 86;
+  // 可用区域：避开顶部状态条与底部输入栏。
+  // topPad 要跟着**气泡的实际高度**走 —— 长回复时气泡能占到 34vh，
+  // 固定值会让模型被压在气泡底下（用户报过「回复太长会挡住头部」）。
+  const padX = 10;
+  const topPad = Math.max(38, bubbleBottom() + 8);
+  const bottomPad = 86;
   const availX0 = padX, availX1 = w - padX;
   const availY0 = topPad, availY1 = h - bottomPad;
   const availW = Math.max(1, availX1 - availX0);
@@ -466,7 +498,14 @@ function doSend() {
 $("send").onclick = doSend;
 $("text").addEventListener("keydown", (e) => { if (e.key === "Enter") doSend(); });
 
-// 按住说话
+// 按住说话。
+//
+// 两个真机踩到的坑：
+//  1. 长按会被 WebView 当成「选中文字」，弹出选择手柄并打断录音。
+//     除了 CSS 禁选，还要吃掉 contextmenu 事件。
+//  2. 原先用 pointerleave 结束录音 —— 手指稍微滑出按钮就停了。
+//     改成 setPointerCapture 把指针锁在这个按钮上，只有真正抬手
+//     （pointerup/pointercancel）才结束。
 let recording = false;
 function startRec() {
   const err = native.startRecording();
@@ -482,9 +521,18 @@ function stopRec() {
   setStatus("转写中…");
   native.stopRecording();
 }
-["pointerdown"].forEach(ev => $("mic").addEventListener(ev, (e) => { e.preventDefault(); startRec(); }));
-["pointerup","pointercancel","pointerleave"].forEach(ev =>
+$("mic").addEventListener("pointerdown", (e) => {
+  e.preventDefault();
+  try { $("mic").setPointerCapture(e.pointerId); } catch (_) {}
+  startRec();
+});
+["pointerup", "pointercancel"].forEach(ev =>
   $("mic").addEventListener(ev, (e) => { e.preventDefault(); stopRec(); }));
+
+// 长按弹菜单 / 选中，一律吃掉
+document.addEventListener("contextmenu", (e) => e.preventDefault());
+$("bar").addEventListener("selectstart", (e) => e.preventDefault());
+$("mic").addEventListener("selectstart", (e) => e.preventDefault());
 
 // 拍照：相机在原生侧（浏览器里 http 拿不到 getUserMedia，原生没这个限制）。
 // 这里只负责按一下，原生拍好后通过 Miku.onPhoto(base64) 回传。
@@ -499,6 +547,21 @@ window.Miku.onPhoto = (b64) => {
   $("cam").classList.add("attach");
   setStatus("已就绪", "on");
   showBubble("拍好啦～发送时会一起给 Miku 看", "NORMAL");
+};
+
+// 视频对话开关。和 PC 同一套做法：**不推流**，只在说完一句话时自动附一张画面。
+// 好处是摄像头不会一直开着（指示灯常亮是隐私问题），也不费流量。
+let videoMode = localStorage.getItem("miku_video_mode") === "1";
+function applyVideoMode() {
+  const b = $("video");
+  if (b) b.classList.toggle("on", videoMode);
+  native.setVideoMode && native.setVideoMode(videoMode);
+}
+$("video").onclick = () => {
+  videoMode = !videoMode;
+  localStorage.setItem("miku_video_mode", videoMode ? "1" : "0");
+  applyVideoMode();
+  showBubble(videoMode ? "视频对话打开啦～以后你说话时我会顺便看一眼☆" : "视频对话关掉了哦", "NORMAL");
 };
 
 // 水印开关。模型里 Param137=1 是隐藏，默认隐藏；想显示回来点一下。

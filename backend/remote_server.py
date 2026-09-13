@@ -369,8 +369,17 @@ class RemoteServer:
             await ws.send_json({"type": "transcript", "text": ""})
             return
         await ws.send_json({"type": "transcript", "text": text})
-        # 转写完直接当成一次对话
-        await self._do_chat(ws, {"text": text, "session_id": req.get("session_id")}, peer)
+        # 转写完直接当成一次对话。image 透传过去 —— 手机端「视频对话」开启时
+        # 会说一句话附一帧画面（和 PC 端同一套做法），这里不能把它丢掉。
+        await self._do_chat(
+            ws,
+            {
+                "text": text,
+                "session_id": req.get("session_id"),
+                "image": req.get("image"),
+            },
+            peer,
+        )
 
     def _transcribe_wav(self, wav_bytes: bytes) -> str:
         """把手机传来的 WAV 交给配置好的转写通道。"""

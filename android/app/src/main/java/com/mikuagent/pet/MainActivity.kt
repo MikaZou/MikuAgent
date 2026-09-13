@@ -69,6 +69,9 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
     @Volatile
     private var lastStatus: Pair<String, String>? = null
 
+    /** 语音输入时是否自动附一张画面（对应 PC 的「视频对话」开关）。 */
+    private var videoMode = false
+
     /** 模型同步的单飞锁：防止 onCreate 与 WS 就绪两处并发触发同一次同步。 */
     private val syncing = java.util.concurrent.atomic.AtomicBoolean(false)
 
@@ -299,10 +302,33 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
         }
         val (b64, seconds) = result
         Log.i(TAG, "上传语音 ${"%.2f".format(seconds)}s")
-        remote.sendAudio(b64)
+
+        // 和 PC 端「视频对话」同一套做法：**不是**持续推流，而是在说话结束时
+        // 自动配一张画面给 Miku 看。手机上没有摄像头预览，所以只在开头拍一帧；
+        // 这样既能看到主人，又不会一直开着摄像头（指示灯常亮是隐私问题）
+        // 也不费流量。
+        if (videoMode) {
+            photoTaker.take { photo, err ->
+                if (photo != null) {
+                    Log.i(TAG, "语音附带画面 ${photo.length / 1024}KB")
+                    remote.sendAudio(b64, photo)
+                } else {
+                    Log.w(TAG, "附带画面失败，只发语音：$err")
+                    remote.sendAudio(b64)
+                }
+            }
+        } else {
+            remote.sendAudio(b64)
+        }
     }
 
     override fun onCancelRecording() = capture.cancel()
+
+    /** 手机端的「视频对话」开关：只影响说话时是否附带一帧，不做持续推流。 */
+    override fun onSetVideoMode(on: Boolean) {
+        videoMode = on
+        Log.i(TAG, "视频对话（说话时附一帧）${if (on) "开启" else "关闭"}")
+    }
 
     // 注意用块体而不是 `= remote.ping()`：ping() 返回 Boolean，
     // 表达式体会把返回类型推断成 Boolean，与接口声明的 Unit 不符。
