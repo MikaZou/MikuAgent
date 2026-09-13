@@ -55,7 +55,25 @@ MODEL_DIR = config.REMOTE_MODEL_DIR
 
 
 def _log(msg: str) -> None:
+    """打日志：控制台 **和** data/remote.log 都要写。
+
+    为什么必须落文件：`start.bat` 用的是 `pythonw.exe`（没有控制台），
+    `print` 出来的东西用户完全看不到。
+
+    更要紧的是：对话/转写/语音这些**交互**日志原先只走 print 不落盘，
+    结果 `data/remote.log` 里 65 行全是启动播报、「手机端到底有没有成功
+    对话过」完全无从判断（实测交互记录 0 条，而手机其实已经聊上了）。
+    排查手机端问题时，这个文件是第一手证据，必须完整。
+    """
     print(f"[Remote] {msg}", flush=True)
+    try:
+        path = Path(config.DATA_DIR) / "remote.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')}  {msg}\n")
+    except Exception:  # noqa: BLE001
+        # 落盘失败绝不能影响服务本身
+        pass
 
 
 def _local_ips() -> list[str]:
@@ -201,7 +219,16 @@ class RemoteServer:
 
     # -------------------------------------------------------------- WebSocket
     async def _handle_ws(self, request: web.Request) -> web.WebSocketResponse:
-        ws = web.WebSocketResponse(heartbeat=30, max_msg_size=32 * 1024 * 1024)
+        # compress=False 是**必须**的：aiohttp 的 WebSocketResponse 默认
+        # compress=True，会在握手时广告 permessage-deflate 扩展。而 Android 端
+        # 用的 OkHttp 并不实现这个扩展，两边协商不一致时服务端会把带 RSV1 位的
+        # 帧当成非法帧，报「Received frame with non-zero reserved bits」并断开。
+        # 症状很隐蔽：手机一发语音（205KB）连接就断，文字聊天却完全正常。
+        ws = web.WebSocketResponse(
+            heartbeat=30,
+            max_msg_size=32 * 1024 * 1024,
+            compress=False,
+        )
         await ws.prepare(request)
         self._clients += 1
         peer = request.remote

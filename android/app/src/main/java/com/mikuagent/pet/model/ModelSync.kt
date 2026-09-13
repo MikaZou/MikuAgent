@@ -63,14 +63,20 @@ class ModelSync(private val context: Context) {
      */
     fun sync(host: String, port: Int, onProgress: (Progress) -> Unit = {}): Result {
         val base = "http://$host:$port"
+        val dir = File(context.filesDir, DIR_NAME).apply { mkdirs() }
         val manifest = try {
             fetchManifest("$base/model/manifest")
         } catch (e: Exception) {
+            // 网络抖一下就不渲染是不可接受的 —— 旧版 phone.html 正是把
+            // 「模型可用」和「网络可用」绑死，才会一失败就整站不可用。
+            // 本地已经有完整模型时，直接用缓存继续。
+            if (File(dir, "miku.model3.json").isFile) {
+                Log.w(TAG, "取清单失败，但本地已有模型，改用缓存：${e.message}")
+                return Result.Ready(dir, 0, -1)
+            }
             return Result.Failed("取模型清单失败：${e.message}")
         }
         if (manifest.isEmpty()) return Result.Failed("模型清单是空的（PC 的 REMOTE_MODEL_DIR 没配好？）")
-
-        val dir = File(context.filesDir, DIR_NAME).apply { mkdirs() }
 
         // 只按「相对路径 + 大小」预筛，真正下完再用 sha1 复核
         val need = manifest.filter { (rel, meta) ->

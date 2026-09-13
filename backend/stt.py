@@ -24,7 +24,24 @@ if config.STT_HF_ENDPOINT:
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 
-from faster_whisper import WhisperModel
+# 注意：faster_whisper **不能**在这里 import —— 见 _load_whisper()。
+#
+# 实测代价：模块级 `from faster_whisper import WhisperModel` 会把 torch 拉进来，
+# 而 torch 在有 CUDA 的机器上会预留大块地址空间。表现是进程
+# **提交量 2906 MB 而工作集只有 109 MB**（云转写时完全用不到本地模型）。
+# 这一下就吃掉了本机 31.7 GB 提交上限里的近 3 GB，是模拟器被饿到 ANR 的
+# 主要原因之一。改成按需导入后提交量立刻降下来。
+
+
+def _load_whisper():
+    """按需导入 faster_whisper（只有真的要用本地模型时才付这个代价）。
+
+    必须在导入前设好 HF 镜像等环境变量 —— 上面几行已经在模块加载时设过了，
+    所以这个函数在何时被调用都不会错过时机。
+    """
+    from faster_whisper import WhisperModel  # noqa: PLC0415
+
+    return WhisperModel
 
 
 class SpeechToText:
@@ -66,6 +83,7 @@ class SpeechToText:
                 return self._model
             self._status = "loading"
             try:
+                WhisperModel = _load_whisper()
                 self._model = WhisperModel(
                     self.model_size,
                     device="cpu",

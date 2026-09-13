@@ -207,6 +207,13 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
             is RemoteClient.Event.Ready -> {
                 bridge.onProvider(e.provider.toString())
                 bridge.onStatus("connected", "已连接")
+                // 连上之前同步可能失败过（PC 刚起来、网络抖动）；
+                // 这里补一次，否则模型就永远不加载了。
+                if (!modelReady) {
+                    val host = prefs.getString(KEY_HOST, null) ?: return
+                    Log.i(TAG, "连接就绪但模型未就绪，重新同步")
+                    syncModel(host, prefs.getInt(KEY_PORT, DEFAULT_PORT))
+                }
             }
             is RemoteClient.Event.Transcript -> bridge.onTranscript(e.text)
             is RemoteClient.Event.Reply -> bridge.onReply(e.text, e.emotion)
