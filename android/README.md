@@ -187,20 +187,26 @@ PC 侧同一时刻的交互记录在 `data/remote.log`（对话 / 语音 / 转�
 
 ## 当前进度
 
-已完成：环境搭建、模型解包与校验、PC 侧模型服务、渲染管线、原生 I/O、
-口型包络、表情/动作内存补全、端到端对话（模拟器实测）。
+**四项核心功能已全部在模拟器（Android 15）上验证通过**：
 
-**模拟器实测证据**：模型完整渲染（6×4096² 贴图、141 参数、440 drawable）；
-经 WebView DevTools 驱动页面调原生桥发消息，气泡正确显示回复与情绪；
-`data/remote.log` 记录到「对话 / 语音 / 转写」（此前全为 0）。
+| 功能 | 证据 |
+|---|---|
+| 模型渲染 | `RENDER OK textures=6 texSizes=[4096x4096 ×3] parts=77 params=141 drawables=440`；截图确认全身居中 |
+| 文字对话 + 情绪 | 气泡「晚上好呀主人～ミクです！☆…」`chip=开心` |
+| 语音上传转写 | `语音转写 1.56s`（模拟器无真实麦克风，采到静音属预期） |
+| 拍照 + 视觉对话 | `onCaptureSuccess 1920x1440` → `对话 3.29s (带图=True)`，Miku 回复「你是自己画的吗？还是从哪个游戏里截的呀」 |
+
+`data/remote.log` 里「对话 / 语音 / 转写」记录从 **0 条**变为有记录。
+
+**Android Studio 已就位**：`D:\Android\android-studio`（免安装版，
+自带 JDK 25，桌面已建快捷方式）。项目 `local.properties` 已指向
+`D:\Android\Sdk`，打开本项目就会用对 SDK。
 
 未完成：
 
-- **真机验收**：384MB 贴图在 iQOO 上的实际表现只能真机测（模拟器用
-  SwiftShader 绕开了黑名单，显存表现不代表真机）
-- **真实语音识别**：模拟器没有真实麦克风输入，转写通路验证到了
-  「上传 → 识别 → 返回」，但识别内容是静音。需要真机对着说话验证
-- **相机**：`Bridge` 里已有回传通道，`PhotoTaker` 待实现
-- **Android Studio**：安装包已下好（`D:\Android\downloads\android-studio.exe`
-  与免安装的 `android-studio.zip`），尚未安装。安装后记得把 SDK 路径
-  指向 `D:\Android\Sdk`（安装器默认想装到 `C:\Users\<你>\AppData\Local\Android\sdk`）
+- **真机验收**：这是唯一还差的验收项。需要你在 iQOO 上开 USB 调试并插线。
+  重点看两件事：① 384MB 贴图（6×4096²）在真机 GPU 上的实际表现 ——
+  模拟器是用 SwiftShader 绕开了 Chromium 的 GPU 黑名单，显存表现**不代表真机**；
+  ② 真实语音识别效果。
+- **模型表情切换的实机观感**：9 个表情已在内存里补进 model3.json 并默认应用了
+  「水印」，但情绪→表情的映射（`EMOTION_EXPR`）只做过静态验证。
