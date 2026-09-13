@@ -34,12 +34,24 @@ class Bridge(
         fun onStopRecording()
         fun onCancelRecording()
         fun onPing()
+        /** 页面脚本**初始化完成**（与「模型渲染成功」是两件事） */
+        fun onPageAlive()
         /** 页面自己也需要知道连接状态时用 */
         fun onPageReady(info: String)
         fun onPageFailed(reason: String)
     }
 
     // ------------------------------------------------------------ JS → Kotlin
+
+    /**
+     * 页面脚本已就绪，可以接收指令了。
+     *
+     * 必须和 [ready] 分开：`ready` 是「模型渲染成功」，而这里只是「JS 起来了」。
+     * 早先只用一个信号，导致死锁 —— 原生等 pageReady 才调 loadModel()，
+     * 页面又要等模型加载成功才调 ready()，两边互等，模型永远不加载。
+     */
+    @JavascriptInterface
+    fun pageAlive() = actions.onPageAlive()
 
     @JavascriptInterface
     fun chat(text: String) = actions.onChat(text, null)

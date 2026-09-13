@@ -141,6 +141,22 @@ function applyExpression(name) {
   }
 }
 
+// 贴图诊断：pixi-live2d-display 不同版本把 textures 挂在 internalModel 上，
+// 这里多探几个位置，避免误报成 0。
+function texList() {
+  if (!model) return [];
+  const im = model.internalModel || {};
+  return im.textures || im.textureResources || model.textures || [];
+}
+function texCount() { return texList().length; }
+function texSizes() {
+  return texList().slice(0, 3).map((t) => {
+    if (!t) return "null";
+    const b = t.baseTexture || t;
+    return (b.width || "?") + "x" + (b.height || "?");
+  });
+}
+
 function setStatus(text, cls) {
   $("status").textContent = text;
   const dot = $("dot");
@@ -201,7 +217,14 @@ async function loadModel() {
       loadMs: ms, canvas: [model.internalModel.width, model.internalModel.height],
       parts: core.getPartCount(), params: core.getParameterCount(),
       drawables: core.getDrawableCount(),
-      textures: (model.internalModel.textures || []).length,
+      // 贴图排查用：数量 + 前两张的尺寸。textures 为 0 或尺寸异常都说明
+      // 贴图没真正加载进来（模型会「加载成功」但画出来是全透明）。
+      textures: texCount(),
+      texSizes: texSizes(),
+      bounds: [Math.round(model.x), Math.round(model.y),
+               Math.round(model.width), Math.round(model.height)],
+      scale: Number(model.scale.x.toFixed(4)),
+      stage: [app.renderer.width, app.renderer.height],
       screen: [window.innerWidth, window.innerHeight],
     });
     console.log("RENDER OK " + info);
@@ -217,14 +240,35 @@ function reportFail(msg) {
   native && native.failed && native.failed(msg);
 }
 
+// 模型的本地包围盒，只算一次。用它来定位，就不必猜 anchor / 原点的语义 ——
+// 我在这上面猜错过两次：加 anchor 只看到下半身，去掉 anchor 又跑到屏幕右边。
+let modelBounds = null;
+
 function layout() {
   if (!model || !app) return;
   const w = app.renderer.width / app.renderer.resolution;
   const h = app.renderer.height / app.renderer.resolution;
-  const scale = Math.min(w / model.internalModel.width, h / model.internalModel.height);
-  model.scale.set(scale);
-  model.anchor.set(0.5, 0.5);
-  model.position.set(w / 2, h / 2);
+
+  if (!modelBounds) {
+    // 先在"单位变换"下量一次真实包围盒
+    model.scale.set(1);
+    model.position.set(0, 0);
+    const b = model.getLocalBounds();
+    modelBounds = { x: b.x, y: b.y, width: b.width, height: b.height };
+    console.log("LOCAL_BOUNDS " + JSON.stringify(modelBounds));
+  }
+  if (!(modelBounds.width > 0) || !(modelBounds.height > 0)) return;
+
+  const s = Math.min(w / modelBounds.width, h / modelBounds.height);
+  model.scale.set(s);
+  // 把包围盒的**中心**对齐到屏幕中心
+  model.position.set(
+    w / 2 - (modelBounds.x + modelBounds.width / 2) * s,
+    h / 2 - (modelBounds.y + modelBounds.height / 2) * s,
+  );
+  console.log("LAYOUT s=" + s.toFixed(4) +
+              " pos=" + Math.round(model.position.x) + "," + Math.round(model.position.y) +
+              " screen=" + Math.round(w) + "x" + Math.round(h));
 }
 
 /** 直接写参数，找不到就静默跳过（不同模型参数名可能不同）。 */
@@ -340,7 +384,9 @@ window.addEventListener("unhandledrejection", (e) =>
 
 try {
   console.log("页面脚本就绪");
-  native && native.log && native.log("page script ready");
+  // 告诉原生「JS 起来了」——与「模型渲染成功」是两件事。
+  // 原生收到后才会下发 loadModel()，所以这一步不能等到模型加载完再调。
+  native && native.pageAlive && native.pageAlive();
 } catch (e) { reportFail(e.message); }
 </script>
 </body>

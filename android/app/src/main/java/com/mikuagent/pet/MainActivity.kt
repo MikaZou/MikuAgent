@@ -63,6 +63,10 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
     @Volatile
     private var modelReady = false
 
+    /** 最近一次连接状态。连接可能早于页面就绪，那时要在 onPageAlive 里补发。 */
+    @Volatile
+    private var lastStatus: Pair<String, String>? = null
+
     /** 待处理的录音权限请求，授权后自动继续 */
     private var pendingRecordAction: (() -> Unit)? = null
 
@@ -218,6 +222,7 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
                     RemoteClient.Event.State.DISCONNECTED -> "disconnected"
                     RemoteClient.Event.State.FAILED -> "failed"
                 }
+                lastStatus = state to e.detail
                 bridge.onStatus(state, e.detail)
             }
         }
@@ -266,20 +271,34 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
         remote.ping()
     }
 
-    override fun onPageReady(info: String) {
+    override fun onPageAlive() {
+        Log.i(TAG, "页面脚本就绪（modelReady=$modelReady）")
         pageReady = true
-        // 页面随时可能因为重载而重新 ready，这里只要模型已经同步过就让它加载
+        // 连接可能早于页面加载完成，那样这条状态就丢了 —— 这里补发一次，
+        // 否则界面会一直停在「连接你的 PC」上，看起来像没连上。
+        lastStatus?.let { (state, detail) -> bridge.onStatus(state, detail) }
         if (modelReady) bridge.loadModel()
+    }
+
+    override fun onPageReady(info: String) {
+        Log.i(TAG, "渲染成功: $info")
+        pageReady = true
     }
 
     override fun onPageFailed(reason: String) {
         Log.e(TAG, "页面渲染失败: $reason")
-        // 显存不足是最常见的原因：降采样贴图后重试一次
-        if (assets.textureScale > 0.6) {
+        // 只有「显存不够」这类失败才值得降贴图精度。之前对任何失败都降档，
+        // 结果 WebGL 被 Chromium 拉黑名单（模拟器上常见）时也降了档，
+        // 白白把贴图从 4096 砍到 2048 却解决不了问题。
+        val memoryRelated = Regex("context|contextlost|out of memory|OOM|texture|GPU",
+            RegexOption.IGNORE_CASE).containsMatchIn(reason)
+        if (memoryRelated && assets.textureScale > 0.6) {
             assets.textureScale = 0.5
-            Log.w(TAG, "降低贴图精度到 ${assets.textureScale} 后重试")
+            Log.w(TAG, "疑似显存不足，降低贴图精度到 ${assets.textureScale} 后重试")
             bridge.onStatus("retry", "显存不足，改用半尺寸贴图重试")
             webView.postDelayed({ webView.reload() }, 800)
+        } else {
+            bridge.onStatus("render_failed", reason)
         }
     }
 
