@@ -308,12 +308,14 @@ class PetWindow(Live2DView):
 
     # ---------------------------------------------------------------- 会话
     def _init_session(self) -> None:
+        """取「今天」的会话。三端共享同一条，切设备能接着聊（见 MemoryStore）。
+
+        这里只是把 id 落到 `self.session_id` 供 ChatWorker 使用；
+        真正的跨天纠正发生在 `agent.chat` → `memory.resolve_session`，
+        所以桌宠连续运行过了午夜也不会串到昨天。
+        """
         try:
-            sessions = self.memory.list_sessions()
-            if sessions:
-                self.session_id = sessions[0]["id"]
-            else:
-                self.session_id = self.memory.create_session()["id"]
+            self.session_id = self.memory.get_or_create_today()["id"]
         except Exception as exc:  # noqa: BLE001
             print(f"[MikuAgent] 会话初始化失败：{exc}")
 

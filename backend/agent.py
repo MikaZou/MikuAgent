@@ -189,10 +189,13 @@ class MikuAgent:
 
         platform 为 "phone" 或 "pc"，决定提示词里「怎么让你看到画面」怎么写
         （两端的按钮不一样，写错她会指挥用户去点不存在的按钮）。
+
+        **会话按天划分，三端共享同一条**（见 `MemoryStore.resolve_session`）。
+        `session_id` 在这里只是「同一天内的偏好」：它若不属于今天 —— 客户端跨零点
+        还缓存着昨天的、或桌面端连续运行过了午夜 —— 会被换成今天的会话。
+        跨天纠正只发生在 memory 层，Android / 网页 / 桌面客户端都不用自己判断日期。
         """
-        session = self.memory.get_session(session_id) if session_id else None
-        if session is None:
-            session = self.memory.create_session()
+        session = self.memory.resolve_session(session_id)
 
         history = self.memory.get_messages(session["id"], limit=config.MAX_HISTORY_MESSAGES)
         memories = self.memory.list_memories(limit=50)
