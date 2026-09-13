@@ -213,7 +213,9 @@ class RemoteServer:
             "llm": config.DEEPSEEK_MODEL,
             "tts": config.TTS_ENGINE,
             "stt": config.STT_TRANSCRIBER,
-            "vision": bool(config.VISION_ENABLED or True),
+            # 注意：别写成 `config.VISION_ENABLED or True` —— `x or True` 恒为 True，
+            # 那样不管用户有没有开视频对话，这里永远报 true（踩过）。
+            "vision": bool(config.VISION_ENABLED),
             "voice_id": config.MINIMAX_VOICE_ID or "",
         }
 
