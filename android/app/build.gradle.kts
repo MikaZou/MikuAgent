@@ -74,6 +74,11 @@ dependencies {
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
+    // API Key 落盘加密。手机端独立运行后，App 里第一次出现「能花钱的凭据」，
+    // 明文放在 private prefs 里虽然别的 App 读不到，但 rooted / 备份 / adb 场景下
+    // 就是一串明文。初始化失败会回退普通 prefs（见 SecretStore），不让它把 App 卡死。
+    implementation("androidx.security:security-crypto:1.0.0")
+
     // 单测：合并规则、人设渲染这类**纯逻辑**用 JVM 单测钉住，不跑模拟器。
     testImplementation("junit:junit:4.13.2")
     // org.json 在 android.jar 里是空壳（单测里调用会抛 "not mocked"），

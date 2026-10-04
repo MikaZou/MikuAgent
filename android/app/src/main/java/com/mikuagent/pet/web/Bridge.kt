@@ -41,8 +41,9 @@ class Bridge(
         /**
          * 手机上换 Live2D 模型。
          *
-         * 只是**请求**，不直接改本地状态：真正的切换等 PC 用 `config` 广播回来
-         * 才做，这样 PC 控制台和所有手机的显示永远一致。
+         * **本地直接切**：手机就是「自己用哪个模型」的主人（PC 上已经没有这个设置项）。
+         * 切完顺手告诉 PC 记一笔 —— 只影响 `data/model_prefs.json` 的 `phone`
+         * 与老写法的 `/model/manifest`，PC 不会再广播回来。
          */
         fun onSetModel(id: String)
         /**
@@ -52,6 +53,15 @@ class Bridge(
          * AssetServer），所以由原生一次性打包给它，省得页面去猜。
          */
         fun onDeviceState(): String
+        /**
+         * 保存 API 配置（JSON）。字段名与 PC 的 `.env` 一致
+         * （`DEEPSEEK_API_KEY` 等），这样 PC 的「复制 API 配置」能直接粘进来。
+         */
+        fun onSaveApiConfig(json: String): String
+        /** 读取 API 配置（Key 只回脱敏后的形式，用于界面回显）。 */
+        fun onApiConfig(): String
+        /** 切换对话通道 api / pc / auto。 */
+        fun onSetBrainMode(mode: String)
         /** 页面脚本**初始化完成**（与「模型渲染成功」是两件事） */
         fun onPageAlive()
         /** 页面自己也需要知道连接状态时用 */
@@ -113,6 +123,16 @@ class Bridge(
 
     @JavascriptInterface
     fun setModel(id: String) = actions.onSetModel(id.trim())
+
+    /** 保存 API 配置；返回实际写入的字段名（逗号分隔），失败返回 `ERR:...`。 */
+    @JavascriptInterface
+    fun saveApiConfig(json: String): String = actions.onSaveApiConfig(json)
+
+    @JavascriptInterface
+    fun apiConfig(): String = actions.onApiConfig()
+
+    @JavascriptInterface
+    fun setBrainMode(mode: String) = actions.onSetBrainMode(mode.trim())
 
     @JavascriptInterface
     fun ready(info: String) {

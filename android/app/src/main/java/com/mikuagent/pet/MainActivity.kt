@@ -21,12 +21,22 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import com.mikuagent.pet.audio.AudioCapture
 import com.mikuagent.pet.audio.AudioPlayer
+import com.mikuagent.pet.brain.Brain
+import com.mikuagent.pet.brain.BrainConfig
+import com.mikuagent.pet.brain.BrainFactory
+import com.mikuagent.pet.brain.BrainMode
+import com.mikuagent.pet.brain.LocalBrain
+import com.mikuagent.pet.brain.PcBrain
+import com.mikuagent.pet.brain.Reply
+import com.mikuagent.pet.brain.SecretStore
 import com.mikuagent.pet.camera.PhotoTaker
+import com.mikuagent.pet.memory.MemoryStore
 import com.mikuagent.pet.model.ModelSync
 import com.mikuagent.pet.net.RemoteClient
 import com.mikuagent.pet.web.AssetServer
 import com.mikuagent.pet.web.Bridge
 import org.json.JSONObject
+import android.util.Base64
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -57,6 +67,20 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
     private lateinit var sync: ModelSync
     private lateinit var prefs: SharedPreferences
     private lateinit var photoTaker: PhotoTaker
+
+    /**
+     * 手机端自己的记忆库（SQLite）。
+     *
+     * 「对话在哪儿跑」不影响它：走 PC 时，PC 记它的库、手机记手机的库，
+     * 连上之后靠同步合并（见 docs/TECHNICAL.md §5.12）。
+     */
+    private lateinit var memory: MemoryStore
+
+    /** 最近一次用的会话 id；`resolveSession` 会按日期纠正，这里只是「同一天内的偏好」。 */
+    private var sessionId: Long? = null
+
+    /** 当前对话通道（api / pc）。onChat 每次都现挑，切换模式不用重启。 */
+    private var brain: Brain? = null
 
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
@@ -132,6 +156,7 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
         // 先用上次用的模型起页面；连上 PC 后会以 PC 下发的为准
         activeModelId = prefs.getString(KEY_MODEL, null) ?: AssetServer.DEFAULT_MODEL
         assets.activeModelId = activeModelId
+        memory = MemoryStore.get(this)
         capture = AudioCapture()
         // 口型包络直接喂给页面；30Hz 的频率 evaluateJavascript 扛得住
         player = AudioPlayer { level -> if (pageReady) bridge.onMouth(level) }
@@ -318,7 +343,9 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
                 Log.i(TAG, "PC 广播了模型 ${e.phoneModel}，本机保持 $activeModelId")
             }
             is RemoteClient.Event.Transcript -> bridge.onTranscript(e.text)
-            is RemoteClient.Event.Reply -> bridge.onReply(e.text, e.emotion)
+            // 走 PC 时回复是从 WS 回来的；统一走 deliverReply，
+            // 这样「下面跑的是哪一端」对页面完全透明
+            is RemoteClient.Event.Reply -> deliverReply(e.text, e.emotion)
             is RemoteClient.Event.Speech -> {
                 // 播完后要告诉页面「说完了」，否则状态会一直停在「说话中…」。
                 // AudioPlayer.play 的 onFinished 在播放线程里回调，必须 post 回主线程。
@@ -344,8 +371,64 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
     // ------------------------------------------------------- Bridge.Actions
 
     override fun onChat(text: String, imageBase64: String?) {
+        if (text.isBlank()) return
         if (!modelReady) Log.i(TAG, "模型还没就绪，但聊天不受影响")
-        remote.sendChat(text, imageBase64)
+
+        val current = pickBrain()
+        brain = current
+        Log.i(TAG, "对话走 ${current.kind}：${text.take(20)}（带图=${imageBase64 != null}）")
+
+        // 页面给的是裸 base64（PC 那边直接 b64decode），这里还原成字节给两条路共用
+        val image = imageBase64?.let {
+            runCatching { Base64.decode(it, Base64.DEFAULT) }.getOrNull()
+        }
+
+        current.send(sessionId, text, image) { reply ->
+            when (reply) {
+                is Reply.Ok -> {
+                    sessionId = reply.sessionId
+                    deliverReply(reply.text, reply.emotion)
+                }
+                is Reply.Err -> runOnUiThread { bridge.onError(reply.message) }
+            }
+        }
+    }
+
+    /**
+     * 按当前设置挑一条通道。**每次对话都现挑**，所以改完设置立刻生效，
+     * 不需要重启 App。
+     */
+    private fun pickBrain(): Brain {
+        val config = BrainConfig.load(this)
+        val mode = BrainMode.load(prefs)
+        val host = prefs.getString(KEY_HOST, null)
+        return BrainFactory.pick(
+            mode = mode,
+            config = config,
+            pcConfigured = !host.isNullOrBlank(),
+            context = this,
+            memory = memory,
+            scope = scope,
+            remote = remote,
+        )
+    }
+
+    /**
+     * 把一轮回复交给页面。PC 与手机两条路都汇到这里 ——
+     * 页面、口型、动作逻辑因此完全不用关心后面是哪一端。
+     */
+    private fun deliverReply(text: String, emotion: String) {
+        runOnUiThread { bridge.onReply(text, emotion) }
+        // PC 会自己补一条 speech；手机端要自己合成（Phase 3）。
+        if (brain?.deliversSpeech == false) {
+            speakLocally(text, emotion)
+        }
+    }
+
+    /** 手机端自己合成并播放。Phase 3 接上 TTS 之前是个空实现。 */
+    private fun speakLocally(text: String, emotion: String) {
+        val local = brain as? LocalBrain ?: return
+        if (!local.deliversSpeech) Log.d(TAG, "本地语音待接入：${text.take(12)}")
     }
 
     override fun onConnect(host: String, port: Int) {
@@ -369,7 +452,63 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
         put("textureScale", assets.textureScale)
         put("videoMode", videoMode)
         put("modelReady", modelReady)
+        // 对话通道：页面要显示「现在到底谁在回答」
+        // 注意 `this` —— 这里在 JSONObject().apply{} 里，不加限定符会拿到 JSONObject
+        put("brainMode", BrainMode.load(prefs).id)
+        put("brainKind", pickBrain().kind)
+        put("hasDeepseekKey", BrainConfig.load(this@MainActivity).hasDeepseekKey)
+        put("hasMinimaxKey", BrainConfig.load(this@MainActivity).hasMinimaxKey)
+        put("secretsEncrypted", SecretStore.isEncrypted(this@MainActivity))
+        put("memory", JSONObject().apply {
+            memory.counts().forEach { (k, v) -> put(k, v) }
+        })
     }.toString()
+
+    /**
+     * 保存 API 配置。入参 JSON 的字段名与 PC 的 `.env` 一致，
+     * 所以 PC 设置窗口「复制 API 配置」出来的那段能原样粘进来。
+     */
+    override fun onSaveApiConfig(json: String): String = try {
+        val used = BrainConfig.importJson(this, json)
+        Log.i(TAG, "API 配置已保存：$used")
+        // 配置变了，下一次对话要按新配置重挑通道
+        brain = null
+        used.joinToString(",")
+    } catch (e: Exception) {
+        Log.w(TAG, "API 配置保存失败", e)
+        "ERR:${e.message}"
+    }
+
+    /** Key 只回脱敏形式 —— 页面没必要（也不该）拿到明文。 */
+    override fun onApiConfig(): String {
+        val c = BrainConfig.load(this)
+        return JSONObject().apply {
+            put("deepseekKey", c.masked(c.deepseekKey))
+            put("minimaxKey", c.masked(c.minimaxKey))
+            put("deepseekBaseUrl", c.deepseekBaseUrl)
+            put("deepseekModel", c.deepseekModel)
+            put("temperature", c.temperature)
+            put("thinking", c.thinking)
+            put("minimaxBaseUrl", c.minimaxBaseUrl)
+            put("minimaxTtsModel", c.minimaxTtsModel)
+            put("minimaxVoiceId", c.minimaxVoiceId)
+            put("minimaxSpeed", c.minimaxSpeed)
+            put("minimaxAsrModel", c.minimaxAsrModel)
+            put("sttLanguage", c.sttLanguage)
+            put("visionDetail", c.visionDetail)
+            put("maxHistory", c.maxHistory)
+            put("hasDeepseekKey", c.hasDeepseekKey)
+            put("hasMinimaxKey", c.hasMinimaxKey)
+            put("secretsEncrypted", SecretStore.isEncrypted(this@MainActivity))
+        }.toString()
+    }
+
+    override fun onSetBrainMode(mode: String) {
+        val m = BrainMode.from(mode)
+        BrainMode.save(prefs, m)
+        brain = null   // 下次对话按新模式重挑
+        Log.i(TAG, "对话通道切换为 ${m.id}（下次对话生效）")
+    }
 
     override fun onStartRecording(): String {
         val granted = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
