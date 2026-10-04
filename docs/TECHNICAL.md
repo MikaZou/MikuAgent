@@ -2037,13 +2037,220 @@ def resolve_session(preferred_id=None) -> dict   # 三端唯一入口，preferre
 
 ---
 
+### 5.11 双模型与「完全退出」（**已完成，PC + 真机验证**）
+
+目标来自一句话需求：**「两个模型都保留，让桌面端和手机端可以切换模型」**，
+外加「关掉窗口要能真的关掉」。
+
+#### 5.11.1 为什么以前做不到：模型是**代码里的常量**
+
+改动前，「用哪个模型」写在两个互不相干的地方：
+
+```
+backend/config.py     MODEL_PATH       = assets/live2d/miku/miku.model3.json   # PC 桌宠
+backend/config.py     REMOTE_MODEL_DIR = models/miku_v5                        # 手机端拉取
+ui/live2d_view.py     EMOTION_MOTION / EMOTION_EXPRESSION                      # 照旧模型硬编码
+```
+
+于是「换模型」根本无法表达 —— 只能改代码。更糟的是，`ui/live2d_view.py` 里
+那张情感映射表是照着**经典模型**写的（`Saihong` / `Chijing` / `liuhan` /
+`Tap` / `Flick`），把 `MODEL_PATH` 指到新模型会直接把桌宠的表情搞崩：
+那些表情名在新模型里根本不存在，而 `SetExpression("Saihong")` 找不到东西时
+**不报错、什么都不做**（静默失效）。
+
+现在把它变成**数据**：`backend/models_catalog.py`
+
+| 字段 | 作用 |
+| --- | --- |
+| `id` / `name` / `note` | 标识与界面文案（`miku` = 经典，`miku_v5` = 新模型） |
+| `dir` / `model3` | 目录与 model3.json 文件名 |
+| `profile.emotion_motion` | 情感 → 动作组 |
+| `profile.emotion_expression` | 情感 → 表情名（`None` = 不设表情） |
+| `profile.emotion_tilt` | 情感 → 头部倾角（度） |
+| `profile.watermark_param` | 水印参数名（经典模型为 `None`） |
+| `profile.manual_breath` | 是否要手动驱动呼吸 |
+| `profile.auto_scan_assets` | model3.json 里没写表情/动作时是否扫目录补装 |
+
+「当前用哪个」记在 `data/model_prefs.json`（`desktop` / `phone` 两个键），
+**不进 `.env`**：它是运行期状态，不是部署配置；而且手机端那个是在设置窗口里点的，
+写 `.env` 会让人以为要重启。
+
+#### 5.11.2 手机端怎么知道用哪个模型
+
+**PC 是唯一权威**，因为设置窗口要显示「手机端现在用哪个」——
+两边各切各的必然出现「手机上是新模型、窗口里写着经典模型」。
+
+```
+PC 设置窗口勾选「手机端模型」
+   └─ models_catalog.select("phone", id)  →  写 data/model_prefs.json
+   └─ RemoteController.set_phone_model(id) → 广播 {"type":"config","phone_model":id}
+        └─ 手机 RemoteClient 收到 config → SwitchModel → 重新同步 <id> 的清单 → 重载页面
+
+手机状态栏的「模型 xx」按钮（用户点了）
+   └─ native.setModel(id) → {"type":"set_model","id":…}
+        └─ PC 校验 id → 写选择 → 广播 config 给**所有**客户端（含点它的那台）
+```
+
+手机上**不本地直接切**：只发请求，等 PC 广播回来才真换。这样三处显示永远一致。
+
+#### 5.11.3 路由：同一份目录按 id 暴露，并兼容旧写法
+
+```
+GET /model/list                  → 模型清单 + present 标记 + phone_model
+GET /model/manifest              → 老写法，跟随手机端选择
+GET /model/<id>/manifest         → 指定模型；**同一个响应里带 profile**
+GET /model/<tail:.*>             → 文件。第一段是已知 id 就按该模型目录解析，
+                                    否则整条尾巴当作「手机端当前模型目录」下的相对路径
+```
+
+最后那一条是**为已经装出去的旧页面留的后路**：旧 `web/phone.html` 写的是
+`/model/miku.model3.json` 和 `/model/miku.4096/texture_00.png`，第一段不是模型 id。
+不改页面也能继续跑。（`add_static("/model/")` 已删除，静态目录只能挂一个根，
+而这里有两套模型、还随时可换。）
+
+**profile 随 manifest 一起下发**是关键设计：手机端拿到的情绪映射/水印参数
+与 PC 用的是同一份数据，所以不可能出现「电脑上会脸红、手机上不会」。
+
+#### 5.11.4 桌面端换模型：必须显式销毁渲染器
+
+`Live2DView.load_model()` 的固定顺序是：
+
+```
+DestroyRenderer()  →  丢掉 Python 引用  →  gc.collect()  →  再建新模型
+```
+
+顺序不能反、也不能只靠 GC。实测踩到：先加载经典模型，把它的 `PyModelObject`
+交给 GC（不调 `DestroyRenderer`），再加载新模型 —— **新模型 alpha 全 0，几乎全白**。
+旧渲染器残留的 GL 资源会把新模型毁掉。反过来（新 → 经典）也一样。
+
+#### 5.11.5 取景：两边统一成「画一帧、按 alpha 实测」
+
+以前桌面端是**查表**取景（按窗口高度查一张手工量好的 `(气泡高, scale, dy)` 表），
+手机端是按 `getDrawableVertices()` 的**几何**包围盒。两个都不行：
+
+* 查表只对经典模型成立。新模型画布 3500×8888、美术还**超出画布**
+  （实测 x 782–5158、y −91–8898），表里的数值一用就整个跑偏。
+* 顶点包围盒只给几何范围，**不管那块几何有没有被画出来**。真机实测：
+  经典模型顶点框顶部有 1600 多画布像素是空的，于是模型被判定为「很高」，
+  缩放系数算小一半，人整个缩到屏幕下半部分（截图确认 y 38–363 一个像素都没有）。
+
+现在两端都是同一套：**把模型缩到很小摆到原点 → 画一帧 → `glReadPixels`
+读回 alpha 求包围盒 → 反推本地美术范围 → 算目标 scale 与居中偏移 → 复测校正一轮**。
+
+* 坐标关系是严格线性的（屏幕 = `position` + 本地坐标 × `scale`），所以一轮就收敛。
+* 量之前先 `StopAllMotions()`：眨眼/呼吸/待机动作会让包围盒在几次采样之间漂移。
+* 复测位移要检查是否**贴边**（贴边说明被裁了，读数作废），贴边就把试探步长减半。
+* 手机端把量到的「本地美术范围」缓存起来：它是模型固有属性，与窗口无关，
+  省下每次 `layout()` 十几毫秒的帧缓冲读取。
+
+实测（360×660 窗口，安全带 328×344）：
+
+| 模型 | scale | 实测包围盒 | 落位 |
+| --- | --- | --- | --- |
+| 经典 | 0.867 | 142×342 | 完全落在安全带内 |
+| 新模型 | 0.518~0.544 | 153~158×344 | 完全落在安全带内 |
+
+> 顺带修掉一个真 bug：`IsMotionFinished()` 在**刚加载的模型**上返回 `False`
+> （动作管理器还没被启动过）。照字面理解就是「永远在忙」，于是待机动作一个
+> 都播不出来，模型从头到尾僵着。判据要加一条「本模型是否播过动作」。
+
+#### 5.11.6 补装散装 exp3 / motion3（两个坑）
+
+新模型的 `model3.json` 里 `Expressions` / `Motions` **都是空的**，8 个表情是
+独立 `.exp3.json`，VTS 靠 `miku.vtube.json` 热键表加载。标准运行时不会自动发现，
+所以用 `LoadExtraExpression` / `LoadExtraMotion` 在**内存里**补装
+（模型授权「不可二传二改」，磁盘文件一个字节都不能动）。
+
+两个必须记住的行为：
+
+1. **补装的东西不会出现在 `GetExpressionIds()` / `GetMotionGroups()` 里**。
+   实测：8 个表情补装成功、`SetExpression("比心")` 真的改动了 5 个参数，
+   但 `GetExpressionIds()` 依然返回 `[]`。所以必须**自己把名字记下来**，
+   否则「表情列表为空 → 不设表情」「动作组为空 → 永远不播待机」。
+2. `LAppModel.GetMotions()` 会把结果**缓存**在 `_motions_cache` 里，
+   而补装的动作压根不进这个缓存 —— 补装前若已经调过一次 `GetMotionGroups()`，
+   之后永远是空。要显式清缓存，或者自己记数。
+
+顺带一个原生行为：`GetPartCount()` 在 live2d-py 的 C++ 层**不存在**，
+调用会抛 `AttributeError`，只能用 `len(GetPartIds())`。
+
+#### 5.11.7 控制台 = 设置窗口，以及「完全退出」
+
+原始需求里是一条独立的「控制台主页」。实现后按反馈收敛了：
+**换模型 / 语音开关 / 退出本来就是一回事**，拆成两个窗口只会让
+「设置到底在哪儿改」更含糊。所以只有一个设置窗口，它在启动时第一个出现
+（`main.py` 里 `window.open_settings()` 先于 `window.start()`），
+并占据原来分散在三处（设置面板 / 托盘菜单 / 只有悬停才出现的角标按钮）的能力。
+
+**为什么退出要专门做一层**（`ui/app_control.py`）：桌宠窗口是
+`Qt.Tool + 无边框 + 置顶`，**不进任务栏**。用户一旦把它关掉而进程没退，
+就再也找不回来了（任务栏没有，只能开任务管理器）。而退出路径有三个入口
+（角标 ×、托盘菜单、设置窗口按钮），以前各写一半、都只调一次
+`QApplication.quit()`；只要有一处没松开（摄像头线程、没销毁的渲染器、
+占着显存的 TTS 合成进程），进程就留在后台。
+
+现在三个入口全部收敛到 `AppControl.quit_all()`：
+
+```
+武装看门狗(threading.Timer 8s → os._exit(0))
+  → 停语音 → 停远程服务 → 关设置窗口 → 关桌宠(预备收尾) → 卸载托盘 → 关合成服务
+  → QTimer.singleShot(0, app.quit)
+```
+
+看门狗必须是**独立线程**的 `threading.Timer`，不能是 `QTimer`：
+事件循环只要被谁卡住，QTimer 也不会再触发，而「完全关闭」这个承诺必须兑现。
+
+#### 5.11.8 验证（全部实测，不是推断）
+
+| 验证 | 手段 | 结果 |
+| --- | --- | --- |
+| 两个模型都能渲染 + 互换 | `tools/test_desktop_models.py`（真 GL 窗口） | 30/30 通过（含 v5→经典→v5 换回） |
+| 多模型路由 / 广播 / 穿越防护 | `tools/test_models_api.py` | 29/29 通过 |
+| 设置窗口不该乱发换模型信号 | `tools/test_settings_dialog.py` | 13/13 通过 |
+| 桌面端换模型（真 UI） | UI Automation 点单选框 | 日志 `切换模型：miku_v5 → miku`、prefs 落盘 |
+| **完全退出（真按钮）** | `tools/test_quit_by_uia.ps1` 点设置窗口的「完全退出」+ 确认框 | 进程树全退、8765/18520 释放 |
+| 手机端渲染两个模型 | 真机截图 + `tools/phone_cdp.py` 读页面变量 | 都完整落在安全带内 |
+| 手机端换模型 | 真机点状态栏「模型」按钮 | PC 日志 `请求切换模型 → miku`、phone 选择落盘、手机重载 |
+| 对话 / 转写 / 语音 | 真机发文字 + 长按说话 | `data/remote.log` 三类记录齐全 |
+
+#### 5.11.9 联调时踩到的环境问题
+
+* **MIUI 的 logcat 对第三方应用时有时无**：同一个 tag，前一次能看到整段，
+  下一次一条都没有。排查手机端只能靠 CDP 直接问页面
+  （`tools/phone_cdp.py`，走 `webview_devtools_remote_<pid>`）——
+  拿到的还是**当下真实**的变量值，比日志更可信。
+* **`adb install` 在 MIUI 上会弹确认框**，屏幕锁着时直接失败
+  （`INSTALL_FAILED_ABORTED: User rejected permissions`）。
+  用 `adb push` + `adb shell pm install -r -t` 可以免弹窗。
+* **截屏不要用 `adb exec-out screencap -p > file`**（PowerShell 会把二进制
+  当文本处理，PNG 直接损坏），要用 `adb shell screencap -p /sdcard/x.png` + `adb pull`。
+* **`.ps1` 必须 ASCII-only**：仓库脚本是 UTF-8 + LF + 无 BOM，PowerShell 5.1
+  会错位解码、吞掉换行。我自己写的 `tools/test_quit_by_uia.ps1` 里放了中文字面量，
+  结果报「缺少右 }」并把字符串本身显示成乱码 —— 中文字面量要用
+  `[char]0x5B8C` 这种码点拼出来。
+* **Qt 的 `QMessageBox` 在 UI Automation 里不是顶层窗口**，而是挂在父窗口下的
+  子元素。只枚举顶层窗口会找不到确认框（实测确认框明明开着）。
+* **`.venv\Scripts\python.exe` 是转发器**：它会再起一个 Anaconda 的 `python.exe`
+  跑真正的应用（两个 `main.py` 进程，父的那个没有窗口）。
+  按「命令行含 main.py」判断存活、按窗口 pid 找 UI 时都要注意这一点。
+
+---
+
 ## 6. 附录
 
 ### 6.1 工具清单
 
 | 工具 | 用途 |
 | --- | --- |
-| `tools/measure_framing.py` | 测量模型在指定窗口尺寸下的包围盒，用于精确摆放气泡与模型 |
+| `tools/measure_framing.py` | 复述自动取景实际算出的 scale/offset，并检查是否溢出安全区（300 行→改为实测） |
+| `tools/probe_models.py` | 在真 GL 上下文里量两个模型的画布/美术范围/scale 与 offset 单位（取景算法的依据） |
+| `tools/test_desktop_models.py` | 桌面端回归：两个模型都渲染得出来、能互换、取景落位、画像引用齐全、待机真会动 |
+| `tools/test_models_api.py` | 远程服务多模型路由回归：清单 / manifest / 文件 / 目录穿越 / 广播 / 旧写法 |
+| `tools/test_settings_dialog.py` | 设置窗口不该在程序化刷新时发出「换模型」信号（否则手机会被反复叫去重同步） |
+| `tools/test_quit_by_uia.ps1` | 用 UI Automation **真的点**设置窗口的「完全退出」+ 确认框，断言进程树退出、端口释放 |
+| `tools/phone_cdp.py` | 真机上直接对 WebView 页面求值（MIUI 的 logcat 不可靠时的唯一手段） |
+| `tools/diag_v5_native.py` | 变量隔离：新模型在原生渲染器上「画不出来」到底是哪一步的问题 |
+| `tools/diag_switch.py` | 同一进程内 A→释放→B，验证换模型必须显式 `DestroyRenderer()` |
 | `tools/diag_vision.py` | 视觉诊断：摄像头探测 / API 视觉验证 / 合成画面的端到端链路 |
 | `tools/ui_probe.py` | 轻量 UI 夹具（不加载 TTS/STT），内存吃紧时验证界面布局 |
 | `tools/analyze_motions.py` | 解析全部动作的分组/时长/曲线规模，展示 motion3.json 结构 |
@@ -2107,6 +2314,23 @@ def resolve_session(preferred_id=None) -> dict   # 三端唯一入口，preferre
 | **Miku 让手机用户点不存在的按钮** | 手机端问「你看得到我吗」，她回「点一下 📹 就好啦」，但手机底部只有 📷/🎤/➤ | `persona.py` 把 PC 的按钮硬编码进了提示词 | `build_system_prompt` 增加 `platform` 参数，远程路径传 `phone` |
 | **状态永远停在「转写中…」** | 界面看起来像卡死，其实一切正常 | `onReply` 里根本没有 `setStatus`，状态机缺了一环 | 补齐 `录音中→转写中→思考中→说话中→已就绪`，并新增原生 `onSpeechEnd` 回调 |
 | **长按麦克风会打断录音** | 长按弹出文字选择手柄，录音中断 | 长按被 WebView 当成「选中文字」；且原用 `pointerleave` 结束录音，手指滑出按钮就停 | CSS 禁选 + 吃掉 `contextmenu`/`selectstart`；改用 `setPointerCapture` |
+
+**双模型 / 完全退出（本轮新增，按代价排序）**
+
+| 坑 | 现象 | 根因 | 修法 |
+| --- | --- | --- | --- |
+| **换模型后新模型全白** | 先经典、后新模型时新模型 alpha 全 0（单独加载新模型却完全正常） | 旧 `LAppModel` 的 `CubismRenderer` 还活着并占着 GL 资源，只靠 GC 释放时机不可控 | `load_model()` 里固定顺序：`DestroyRenderer()` → 丢引用 → `gc.collect()` → 建新模型（§5.11.4） |
+| **顶点包围盒把模型算小一半** | 手机端经典模型缩到屏幕下半部分，取景框顶部 325px 一个像素都没有 | `getDrawableVertices()` 只给**几何**范围，不管那块几何有没有被画出来（实测空出 1600 多画布像素） | 两端统一改「画一帧 + `glReadPixels` 读 alpha 求包围盒」（§5.11.5） |
+| **补装的表情/动作「查不到」** | 8 个表情补装成功、`SetExpression` 也真的生效，但 `GetExpressionIds()` 返回 `[]` | 补装只进内部注册表，不进 getter 返回的列表；`GetMotions()` 还额外有一层 Python 缓存 | 自己记名字、取并集；补装前清 `_motions_cache`，或自己记动作数（§5.11.6） |
+| **刚加载的模型永远「在忙」** | 待机动作一个都不播，模型从头僵到尾 | `IsMotionFinished()` 在新模型上初始返回 `False`（动作管理器还没启动过） | 判据加一条 `_played_any`：本模型还没播过动作时不要相信它（§5.11.5） |
+| **两个模型的美术范围差一个数量级** | 写死的 scale/offset 只对一个模型成立，换模型就整个跑偏 | 新模型画布 3500×8888、美术还**超出画布**（x 782–5158、y −91–8898） | 取景不再查表，改为运行时实测拟合（§5.11.5） |
+| **``GetPartCount()` 不存在** | 探测脚本直接 `AttributeError` | live2d-py 的 C++ 层没实现这个方法，Python 封装却暴露了名字 | 用 `len(GetPartIds())` |
+| **「关了窗口但应用还在」找不到入口** | 桌宠窗口无边框、`Qt.Tool` **不进任务栏**，关掉后进程若没退就再也找不回来 | 三个退出入口各写一半，都只调一次 `QApplication.quit()`；任一处资源没松开进程就留着 | 收敛到 `AppControl.quit_all()` + 独立线程看门狗（§5.11.7） |
+| **看门狗不能用 `QTimer`** | 想「无论如何都退出」，结果事件循环一卡，定时器也不触发 | `QTimer` 跑在同一个事件循环里 | 用 `threading.Timer` + `os._exit(0)`（§5.11.7） |
+| **单选框在程序化刷新时误发信号** | `remote.log` 里出现「手机端模型已切到 A」紧接着又切回 B，没人点过 | 需要区分「用户点选」与「程序同步显示」 | `ModelPicker._loading` 守卫；另把 `change_phone_model` 做成幂等（`select()` 返回 False 就不动） |
+| **`onModels` 传成 `[object Object]`** | 手机状态栏的「模型 xx」按钮永远不出现 | JSON 文本没加引号直接塞进 JS，页面收到真数组，`JSON.parse` 失败 | Kotlin 侧用 `q(json)` 包成字符串；并在 `onPageAlive` **补发**（`ready` 常早于页面就绪） |
+| **`.ps1` 里写中文字面量** | 脚本报「缺少右 }」，字符串本身显示成乱码 | 仓库脚本 UTF-8 + LF + 无 BOM，PowerShell 5.1 错位解码、吞换行 | 保持 ASCII-only，中文字面量用 `[char]0x5B8C` 拼 |
+| **UIA 找不到确认框** | 设置窗口的「完全退出」点得动，但脚本报「确认框没出现」 | Qt 的 `QMessageBox` 在 UI Automation 里是父窗口的**子元素**，不是顶层窗口 | 按进程 id 在**所有**窗口的子树里找按钮 |
 | **长回复挡住模型的头** | 气泡最多占 34vh，把模型压在底下 | 布局的上方留白**写死** 38px | `layout()` 改为读气泡实际 `bottom` 作为留白，显示/隐藏时重新布局 |
 | **开发机内存不够导致模拟器 ANR** | Android 的 system_server 被饿死，弹「Process system isn't responding」 | 页面文件被**固定 16GB 且非系统管理**，提交上限锁死 31.7GB；且 STT 模块级 `import faster_whisper` 会拉进 torch，torch 在有 CUDA 的机器上预留巨量地址空间（**提交 2905MB 而工作集只有 428MB**） | 改惰性导入（提交量 2905→673MB）；构建前先停模拟器；根治要管理员调大页面文件 |
 | **模拟器 WebGL 被黑名单** | `WebGL1 blocklisted`，PIXI 报 `WebGL unsupported` | Chromium 把模拟器的 GPU 拉进黑名单（**真机不受影响**） | `adb shell "echo '_ --ignore-gpu-blocklist --enable-unsafe-swiftshader' > /data/local/tmp/webview-command-line"` |

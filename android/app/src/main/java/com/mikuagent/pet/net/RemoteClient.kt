@@ -18,20 +18,28 @@ import java.util.concurrent.TimeUnit
  *
  *   上行： {"type":"chat",  "text":…, "image":<b64 jpeg 可选>, "session_id":…}
  *          {"type":"audio", "data":<b64 wav>, "session_id":…}
+ *          {"type":"set_model", "id":"miku"|"miku_v5"}
  *          {"type":"ping"}
- *   下行： ready / transcript / reply / speech / error / pong
+ *   下行： ready / config / transcript / reply / speech / error / pong
  *
- * 为什么 WebSocket 放在原生而不是页面里：页面跑在 `https://appassets...` 上，
- * 从 https 页面开 `ws://` 属于 mixed content，浏览器内核会拦掉。原生 socket
- * 完全不受这条规则约束 —— 这也是选混合架构的主要动机之一。
+ * `ready` 里带 `phone_model`（PC 控制台决定的手机端模型）与 `models`（可选清单）；
+ * PC 那边改了模型会再推一条 `config`，手机收到后重新同步该模型并刷新画面。
+ * 反方向也可以：页面上点模型按钮 → `set_model` → PC 写选择并广播回所有客户端。
  */
 class RemoteClient(private val onEvent: (Event) -> Unit) {
 
     // sealed **interface** 的实现在 Kotlin 里不能写 `: Event()`——
     // 带括号是「调用构造函数」，接口没有构造函数。这是编译错误 #3 的原因。
     sealed interface Event {
-        /** PC 端就绪，带上它当前的 provider 信息 */
-        data class Ready(val provider: JSONObject) : Event
+        /** PC 端就绪，带上它当前的 provider 信息与手机端该用的模型 */
+        data class Ready(
+            val provider: JSONObject,
+            val phoneModel: String,
+            val modelsJson: String,
+        ) : Event
+
+        /** PC 改了手机端模型（或别的手机改的，PC 广播过来） */
+        data class Config(val phoneModel: String) : Event
 
         /** 语音转写结果 */
         data class Transcript(val text: String) : Event
@@ -153,9 +161,15 @@ class RemoteClient(private val onEvent: (Event) -> Unit) {
         }
         when (val type = json.optString("type")) {
             "ready" -> {
-                json.optJSONObject("provider")?.let { post(Event.Ready(it)) }
-                    ?: post(Event.Ready(JSONObject()))
+                val provider = json.optJSONObject("provider") ?: JSONObject()
+                val models = json.optJSONArray("models")
+                post(Event.Ready(
+                    provider,
+                    json.optString("phone_model"),
+                    models?.toString() ?: "[]",
+                ))
             }
+            "config" -> post(Event.Config(json.optString("phone_model")))
             "transcript" -> post(Event.Transcript(json.optString("text")))
             "reply" -> {
                 json.optString("session_id").takeIf { it.isNotEmpty() }?.let { sessionId = it }
@@ -200,6 +214,19 @@ class RemoteClient(private val onEvent: (Event) -> Unit) {
     }
 
     fun ping() = send(JSONObject().put("type", "ping"))
+
+    /**
+     * 手机上换模型。不直接改本地状态 —— 先请求 PC，等 PC 用 `config` 广播回来
+     * 再真正切换。这样 PC 控制台、这台手机、别的手机三处显示永远一致，
+     * 不会出现「手机上是新模型、控制台上写着经典模型」。
+     */
+    fun sendSetModel(modelId: String) {
+        if (modelId.isBlank()) return
+        send(JSONObject().apply {
+            put("type", "set_model")
+            put("id", modelId)
+        })
+    }
 
     fun disconnect() {
         manuallyClosed = true

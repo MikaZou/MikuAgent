@@ -32,8 +32,10 @@ start.bat
 ## ✨ 功能特性
 
 - **原生 Live2D 渲染**：直接调用 Live2D Cubism Native SDK（Cubism Core 5.1），无 Chromium、无本地端口、无 WebView。支持鼠标注视跟随、点击互动、情感表情（腮红/吃惊/眯眯眼等 exp3）、自动眨眼与呼吸。
+- **两套模型随时换**：经典模型与新模型（moc3 v5，6×4096² 贴图）都保留，桌面端与手机端各自可选，切换立刻生效、不用重启。
 - **真正的透明桌宠窗口**：无边框、逐像素透明、始终置顶、不进任务栏，按住模型即可拖动。
-- **系统托盘**：显示/隐藏、回到屏幕中央、设置、退出。
+- **启动即控制台**：设置窗口在启动时先出现，集中了运行状态、模型切换、语音开关与「完全退出」。
+- **系统托盘**：显示/隐藏、打开控制台、回到屏幕中央、设置、完全退出。
 - **DeepSeek Agent 大脑**：通过 OpenAI 兼容接口接入 `deepseek-flash`（DeepSeek-V4.1-Flash，默认关闭思考模式以保响应速度），支持 function calling；可换 `deepseek-chat` / `deepseek-reasoner`。
 - **角色设定**：完整人设（16 岁虚拟歌姬、活泼元气、喜欢葱和音乐），情感标签（`[HAPPY]` 等）实时驱动 Live2D 表情与动作。
 - **记忆系统**：
@@ -58,19 +60,22 @@ MikuAgent/
 │   ├── input_bar.py         # 输入栏（含按住说话）
 │   ├── chat_worker.py       # 后台线程：对话 / 转写 / 合成
 │   ├── audio.py             # WAV 播放（sounddevice）
-│   ├── settings_dialog.py   # 设置面板
+│   ├── settings_dialog.py   # 设置窗口 =「控制台」：状态 + 换模型 + 完全退出
+│   ├── app_control.py       # 集中式「完全退出」（收敛三个入口 + 看门狗）
 │   └── tray.py              # 系统托盘
 ├── backend/                 # Agent 核心（与 UI 解耦，纯 Python）
 │   ├── agent.py             # DeepSeek Agent（对话、工具调用、情感解析）
 │   ├── persona.py           # 初音未来角色设定（系统提示词）
 │   ├── memory.py            # 记忆系统（SQLite）
+│   ├── models_catalog.py    # 两套模型的清单与渲染画像（情感映射/水印/取景）
 │   ├── stt.py               # 语音输入（麦克风 + faster-whisper）
 │   ├── tts.py               # 语音输出（文本清洗 + 合成 + 缓存）
 │   ├── tts_server.py        # 可选：GPT-SoVITS 合成服务（独立进程，见 TTS 一节）
 │   └── config.py            # 配置读取
 ├── assets/                  # 资源
-│   ├── live2d/miku/         # 初音 Live2D 模型（MIKU.moc3 + 表情/动作）
+│   ├── live2d/miku/         # 经典模型（MIKU.moc3 + 表情/动作）
 │   └── img/                 # 备用立绘
+├── models/miku_v5/          # 新模型（moc3 v5，不入库；授权「不可二传二改」）
 ├── tools/                   # 开发辅助脚本
 │   ├── smoke_live2d.py      # 最小渲染验证（排查显卡/驱动问题）
 │   ├── selftest_chat.py     # 端到端自检（对话→TTS→口型）
@@ -84,6 +89,7 @@ MikuAgent/
 ├── data/                    # 运行时数据（自动生成，不入库）
 │   ├── mikuagent.db         # 会话 / 消息 / 长期记忆
 │   ├── window.json          # 窗口位置记忆
+│   ├── model_prefs.json     # 桌面端 / 手机端各自选了哪个模型
 │   └── tts-cache/           # 语音合成缓存
 ├── requirements.txt
 ├── requirements-tts.txt     # 可选：本地初音音色（体积大）
@@ -236,14 +242,46 @@ GPT-SoVITS 是「整段合成完才出声」。回复会被按句切开，**第�
 
 编辑 `backend/persona.py` 即可调整 Miku 的性格、爱好、说话风格与情感标签规则。
 
-情感标签与 Live2D 动作/表情的映射在 `ui/live2d_view.py` 的 `EMOTION_MOTION` / `EMOTION_EXPRESSION` 两张表里：
+### 两套 Live2D 模型，随时可换
+
+仓库里保留**两个**模型，桌面端和手机端各自可以选（设置窗口里点一下即可）：
+
+| id | 名字 | 素材 | 特点 |
+| --- | --- | --- | --- |
+| `miku` | 初音ミク · 经典 | moc3 v4 · 1 张 4096² 贴图 | 13 个动作 / 6 张表情 |
+| `miku_v5` | 初音ミク · 新模型 | moc3 v5 · 6 张 4096² 贴图 | 全身取景 / 8 张表情 |
+
+「用哪个」记在 `data/model_prefs.json`（`desktop` / `phone` 两个键），
+**不是** `.env` —— 它是运行期状态，切换立刻生效、不用重启。
+
+每个模型的动作/表情/水印映射写在 `backend/models_catalog.py` 的 `profile` 里，
+并由 PC 随模型清单一并下发给手机，所以**两端用的是同一份映射**：
 
 ```python
-EMOTION_MOTION     = {"HAPPY": "Tap", "ANGRY": "Flick", ...}
-EMOTION_EXPRESSION = {"HAPPY": "Saihong", "SURPRISED": "Chijing", ...}
+{
+  "id": "miku_v5",
+  "profile": {
+    "emotion_motion":     {"HAPPY": "Idle", ...},        # 情感 → 动作组
+    "emotion_expression": {"HAPPY": "比心", ...},         # 情感 → 表情名
+    "emotion_tilt":       {"HAPPY": -6, ...},            # 情感 → 头部倾角（度）
+    "watermark_param":    "Param137",                    # 水印参数（经典模型为 None）
+    "manual_breath":      False,                         # 是否手动驱动呼吸
+    "auto_scan_assets":   True,                          # model3.json 为空时扫目录补装
+  },
+}
 ```
 
-模型取景（大小与垂直位置）在 `ui/pet_window.py` 顶部的 `FRAMING_SCALE` / `FRAMING_OFFSET`。
+> 新模型的 `model3.json` 里 `Expressions` / `Motions` **都是空的**（8 个表情是
+> 独立的 `.exp3.json`，VTS 靠 `miku.vtube.json` 热键表加载）。运行时用
+> `LoadExtraExpression` / `LoadExtraMotion` 在内存里补装，**不动磁盘上的模型文件**
+> —— 模型授权写明「不可二传二改」。
+
+模型**取景不用手调**：`Live2DView.auto_frame()` 会实测美术包围盒再拟合
+（画一帧 → 读回 alpha → 反推缩放与居中偏移），换模型、改窗口尺寸都自适应。
+想复核某组数值就跑 `python tools\measure_framing.py 360 660 miku`。
+
+水印默认**关掉**（模型说明要求默认打开，但用户要求去掉）；设置窗口里的
+「显示模型水印」可以开回来。经典模型没有水印参数，那个选项会自动禁用。
 
 ## 🛠️ 技术栈
 
@@ -365,6 +403,15 @@ WebSocket / 录音 / 播放 / 口型 / 相机全部由 Kotlin 持有。
 
 ## ❓ 常见问题
 
+- **怎么才能真的把 Miku 关掉？** 桌宠窗口是无边框、**不进任务栏**的，所以关掉它
+  不等于退出。要完全关闭，用三种办法之一：设置窗口右下角的「完全退出 MikuAgent」
+  （启动时它会先出现）、右键托盘图标 →「完全退出」、或直接点桌宠左上角的 `×`。
+  三条路都会停掉语音合成、松开摄像头、释放 Live2D 显存并退出整个进程；
+  万一有组件卡在清理里，8 秒看门狗也会强制结束进程。
+  只想让它消失一会儿就点「隐藏 Miku」，之后从托盘或设置窗口都能叫回来。
+- **想让 Miku 换成另一套模型 / 换回来**：设置窗口里「桌面端模型」「手机端模型」
+  各有一个单选项，点一下立刻生效。手机端改完会**推送给已连接的手机**，
+  手机会重新同步该模型并刷新画面（模型都缓存在手机上，切回去很快，不用重下）。
 - **看不到 Miku / 窗口一片空白**：先跑 `python tools\smoke_live2d.py` 验证 OpenGL 与模型。若报显卡驱动问题，请更新显卡驱动。
 - **`import PySide6.QtCore` 报 `ERROR_PROC_NOT_FOUND`**：装到了 PySide6 6.11。该版本的 wheel 缺 ICU DLL，请按 `requirements.txt` 约束装回 6.8.x。
 - **回复是「演示模式」**：`.env` 中未配置或未正确配置 `DEEPSEEK_API_KEY`，或 `MOCK_MODE=true`。

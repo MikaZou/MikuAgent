@@ -2,6 +2,10 @@
 
 窗口本身就是 Live2DView（QOpenGLWidget 作为顶层窗口），
 气泡/输入栏/按钮是它的子控件，由 Qt 合成在 OpenGL 内容之上。
+
+取景不再查表：`Live2DView.auto_frame()` 会按**实测的美术包围盒**把模型拟合进
+「气泡下沿 ~ 输入栏上沿」这条安全带。原来那张按窗口高度写死的 scale/dy 表
+只对经典模型成立，换成新模型（moc3 v5，美术超出画布）就会整个跑偏。
 """
 from __future__ import annotations
 
@@ -10,11 +14,12 @@ import random
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QPoint, Qt, QTimer
+from PySide6.QtCore import QRect, Qt, QTimer
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QWidget
 
 import config
+import models_catalog
 from ui.audio import AudioPlayer
 from ui.bubble import SpeechBubble
 from ui.capture import CameraSession, camera_available, capture_clipboard, capture_screen
@@ -25,53 +30,23 @@ from ui.live2d_view import Live2DView
 from ui.settings_dialog import SettingsDialog
 from ui.tray import Tray
 
-# 模型取景。实测：Resize 后模型底部贴着窗口底边，dy 为正会把模型上移
-# （0.15 ≈ 33 逻辑像素）。
-#
-# 取景（模型位置/大小）和气泡最大高度是**配套**的：气泡越高，模型要让得越多。
-# 下面这张表是用 tools/measure_framing.py 在 360 宽下逐档量出来的实测值，
-# 目的是让模型包围盒完整落在「气泡下沿 ~ 输入栏上沿」之间：
-#
-#   窗口高 600：气泡 132 / scale 0.80 / dy 0.15 -> 模型 top 191 bottom 507
-#              安全区 [184, 524]，上下各留 7 / 17px
-#   窗口高 660：气泡 188 / scale 0.80 / dy 0.00 -> 模型 top 248 bottom 564
-#              安全区 [240, 584]，上下各留 8 / 20px
-#              （模型尺寸和 600 时完全一样，128x316，只是整体下移，
-#                用窗口多出来的高度换气泡空间）
-#
-# 写死单一数值的话，一旦 WINDOW_HEIGHT 被改小，气泡就会压到模型头上 ——
-# 所以按窗口高度查表。
-_LAYOUT_BY_HEIGHT = {
-    # 窗口高: (气泡最大高, 模型 scale, 模型 dy)
-    600: (132, 0.80, 0.15),
-    660: (188, 0.80, 0.00),
-}
-
-
-def _layout_for(height: int) -> tuple[int, float, tuple[float, float]]:
-    """按窗口高度选一套量过的布局。
-
-    没量过的尺寸取「不超过它的最大已量档」：宁可气泡小一点，
-    也不要突破安全区把模型盖住。
-    """
-    if height in _LAYOUT_BY_HEIGHT:
-        return _LAYOUT_BY_HEIGHT[height]
-    smaller = [h for h in _LAYOUT_BY_HEIGHT if h <= height]
-    key = max(smaller) if smaller else min(_LAYOUT_BY_HEIGHT)
-    bubble_h, scale, dy = _LAYOUT_BY_HEIGHT[key]
-    return bubble_h, scale, (0.0, dy)
-
-
-BUBBLE_MAX_H, FRAMING_SCALE, FRAMING_OFFSET = _layout_for(config.WINDOW_HEIGHT)
-
-# 布局尺寸（改这里要同步 tools/measure_framing.py 里的同名常量）
+# 布局尺寸
 BUBBLE_MARGIN = 16      # 气泡左右留白
 BUBBLE_TOP = 46         # 气泡距窗口顶部：必须让开上面那排角标按钮
+BUBBLE_GAP = 8          # 气泡下沿与模型之间的空隙
 BUTTON_MARGIN = 10      # 角标按钮距窗口边缘
 BUTTON_SIZE = 30        # 角标按钮边长（与 _corner_button 里的 setFixedSize 一致）
+BAR_H = 58              # 底部输入栏高度
+BAR_MARGIN = 12         # 输入栏距窗口底边
 
-# 摄像头预览（视频对话开启时显示）。放左下角：模型是居中 128px 宽，
-# 这块区域与模型、角标按钮、输入栏都不重叠。
+# 气泡最大高度：以前是照窗口高度查表量出来的（600→132 / 660→188），
+# 那是因为取景写死、必须手工给模型让位。现在模型按安全带自动拟合，
+# 气泡想多高都安全，所以直接用窗口高度的一个比例即可。
+BUBBLE_RATIO = 0.28
+BUBBLE_MIN, BUBBLE_MAX = 96, 220
+
+# 摄像头预览（视频对话开启时显示）。放左下角：模型是居中，这块区域与模型、
+# 角标按钮、输入栏都不重叠。
 PREVIEW_W = 96
 PREVIEW_H = 72
 PREVIEW_MARGIN = 12
@@ -92,12 +67,21 @@ QPushButton:hover { background: rgba(57, 197, 187, 220); }
 
 
 class PetWindow(Live2DView):
-    def __init__(self, memory, agent, stt, tts, parent: Optional[QWidget] = None) -> None:
+    def __init__(
+        self,
+        memory,
+        agent,
+        stt,
+        tts,
+        model_id: Optional[str] = None,
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        # 用哪个模型是**运行期状态**，存在 data/model_prefs.json（桌面端一个键）。
+        # 不是 config.MODEL_PATH：那是个部署常量，改了要重启才生效。
+        model_id = model_id or models_catalog.selected("desktop")
         super().__init__(
-            config.MODEL_PATH,
+            model_id,
             fps=config.WINDOW_FPS,
-            framing_scale=FRAMING_SCALE,
-            framing_offset=FRAMING_OFFSET,
             parent=parent,
         )
 
@@ -106,6 +90,8 @@ class PetWindow(Live2DView):
         self.stt = stt
         self.tts = tts
         self.audio = AudioPlayer()
+        # 换模型/退出由控制台统一发起；这里只留引用，便于独立运行时兜底
+        self.app_control = None
 
         self.session_id: Optional[int] = None
         self._busy = False
@@ -116,8 +102,13 @@ class PetWindow(Live2DView):
         self._tts_worker: Optional[TtsPipelineWorker] = None
         self._stt_worker: Optional[TranscribeWorker] = None
         self._recording = False
-        # 初音模型顶部的实测位置（逻辑像素）；用来把角标按钮贴到她头顶上方
+        # 初音头顶的实测位置（逻辑像素）；用来把角标按钮贴到她头顶上方
         self._model_top: Optional[int] = None
+        # 自动取景的防抖：连续 resize 时不要每一帧都做一次拟合（每次要画好几帧）
+        self._fit_timer = QTimer(self)
+        self._fit_timer.setSingleShot(True)
+        self._fit_timer.timeout.connect(self._refit)
+        self._bubble_max_h = BUBBLE_MIN
 
         # 远程服务（手机端）就绪后的地址，供气泡提示与设置面板显示
         self._remote_urls: list = []
@@ -163,20 +154,28 @@ class PetWindow(Live2DView):
         self.preview.hide()
 
         self.btn_min = self._corner_button("─", "最小化", self.showMinimized)
-        self.btn_close = self._corner_button("×", "退出桌宠", self.quit_app)
-        self.btn_settings = self._corner_button("⚙", "设置", self.open_settings)
+        self.btn_close = self._corner_button("×", "完全退出 MikuAgent", self.quit_app)
+        self.btn_settings = self._corner_button("⚙", "控制台 · 设置", self.open_console)
         self.btn_close.setStyleSheet(
             CORNER_QSS.replace("rgba(20, 26, 38, 140)", "rgba(239, 68, 68, 200)")
         )
 
         # ---------------- 托盘 / 设置 ----------------
-        self.settings_dialog = SettingsDialog(self)
+        # 不传父窗口：设置窗口同时充当「控制台」，应该是个正常的顶层窗口
+        # （有标题栏、进任务栏、可以单独最小化），而不是挂在无边框桌宠下面的附属品。
+        self.settings_dialog = SettingsDialog()
         self.settings_dialog.nickname_saved.connect(self.save_nickname)
         self.settings_dialog.tts_toggled.connect(self._on_tts_toggled)
         self.settings_dialog.stt_toggled.connect(self._on_stt_toggled)
         self.settings_dialog.video_toggled.connect(self.set_video_enabled)
         self.settings_dialog.reconfigure_requested.connect(self.open_reconfigure)
-        self.tray = Tray(self, self.open_settings, self.quit_app)
+        self.tray = Tray(
+            self,
+            self.open_settings,
+            self.quit_app,
+            on_console=self.open_console,
+            on_visibility=self._on_pet_visibility,
+        )
         self.tray.show()
 
         self.model_clicked.connect(self._on_model_clicked)
@@ -208,9 +207,33 @@ class PetWindow(Live2DView):
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         self._layout_children()
-        # 尺寸变了模型位置也变，延后重新量一次（避开连续 resize 抖动）
+        # 尺寸变了模型的可用区域也变了，需要重新拟合。
+        # 用单次定时器防抖：拖窗口时 resize 会连发几十次，而每次拟合要画好几帧。
         if self.model is not None:
-            QTimer.singleShot(250, self._measure_model_top)
+            self._fit_timer.start(260)
+
+    def _avail_rect(self) -> QRect:
+        """模型的「安全带」：气泡下沿往下一点 ~ 输入栏上沿往上一点。
+
+        以前这条带子与写死的 scale/dy 配套（见旧版的 _LAYOUT_BY_HEIGHT），
+        现在自动取景会主动把美术塞进这条带子，所以只要把带子算准就行。
+        """
+        w, h = self.width(), self.height()
+        top = BUBBLE_TOP + self._bubble_max_h + BUBBLE_GAP
+        bottom = h - BAR_H - BAR_MARGIN - BUBBLE_GAP
+        # 左下角有摄像头预览时给它让位（预览只在视频对话时才占地方）
+        left = BUBBLE_MARGIN
+        right = w - BUBBLE_MARGIN
+        return QRect(left, top, max(1, right - left), max(1, bottom - top))
+
+    def _refit(self) -> None:
+        """按当前安全带重新拟合模型，并把实测的头顶位置记下来。"""
+        if self.model is None:
+            return
+        ok = self.auto_frame(self._avail_rect())
+        if ok and getattr(self, "model_box", None):
+            self._model_top = int(self.model_box[1])
+        self._layout_children()
 
     def _button_row_y(self) -> int:
         """角标按钮的纵向位置 —— 始终贴住它下面那个东西的上沿。
@@ -242,18 +265,18 @@ class PetWindow(Live2DView):
 
         # 气泡：始终占满可用宽度（而不是随文字长短忽宽忽窄），
         # 这样短句也够大、长句换行整齐，不会再被头发挤成一小块。
-        bar_h = 58
         bubble_w = max(160, w - BUBBLE_MARGIN * 2)
         self.bubble.setFixedWidth(bubble_w)
-        # 高度由气泡自己按内容算（上限 BUBBLE_MAX_H）——
+        # 高度由气泡自己按内容算（上限 _bubble_max_h）——
         # 引入 QScrollArea 后 adjustSize() 不再随内容增长，必须显式驱动。
-        self.bubble.set_max_height(BUBBLE_MAX_H)
+        self._bubble_max_h = int(max(BUBBLE_MIN, min(BUBBLE_MAX, h * BUBBLE_RATIO)))
+        self.bubble.set_max_height(self._bubble_max_h)
 
-        # **底部对齐**：气泡下沿钉死在 BUBBLE_TOP + BUBBLE_MAX_H。
+        # **底部对齐**：气泡下沿钉死在 BUBBLE_TOP + 上限。
         # 内容少时气泡向上收、内容多时向上长，下沿始终不动 ——
         # 于是「小三角 + 与模型之间的间距」是恒定的，不会随文字长短忽大忽小。
         # 反过来（从顶部往下长）会让短消息下方留一大片空白。
-        bubble_bottom = BUBBLE_TOP + BUBBLE_MAX_H
+        bubble_bottom = BUBBLE_TOP + self._bubble_max_h
         bubble_y = max(BUBBLE_TOP, bubble_bottom - self.bubble.height())
         self.bubble.move(max(0, (w - bubble_w) // 2), bubble_y)
 
@@ -264,12 +287,14 @@ class PetWindow(Live2DView):
         self.btn_close.move(BUTTON_MARGIN + BUTTON_SIZE + 6, btn_y)
         self.btn_settings.move(w - BUTTON_MARGIN - BUTTON_SIZE, btn_y)
 
-        self.input_bar.setGeometry(12, h - bar_h - 12, w - 24, bar_h)
+        self.input_bar.setGeometry(
+            BAR_MARGIN, h - BAR_H - BAR_MARGIN, w - BAR_MARGIN * 2, BAR_H
+        )
 
         # 摄像头预览贴左下角，位于输入栏上方
         self.preview.setGeometry(
             PREVIEW_MARGIN,
-            h - bar_h - 12 - PREVIEW_BOTTOM_GAP - PREVIEW_H,
+            h - BAR_H - BAR_MARGIN - PREVIEW_BOTTOM_GAP - PREVIEW_H,
             PREVIEW_W,
             PREVIEW_H,
         )
@@ -428,6 +453,7 @@ class PetWindow(Live2DView):
         if not self._remote_urls:
             return
         print(f"[UI] 手机端可用：{'  '.join(self._remote_urls)}")
+        self.refresh_console()
         # 必须晚于开场问候的隐藏定时器（_greet 里 9 秒后 hide_bubble），
         # 否则刚弹出来就被它顶掉。
         QTimer.singleShot(12000, self._announce_remote)
@@ -654,7 +680,9 @@ class PetWindow(Live2DView):
         return health, stt_status, tts_status, nickname
 
     def open_settings(self) -> None:
-        self.settings_dialog.load_state(*self._settings_state())
+        self.settings_dialog.load_state(
+            *self._settings_state(), console=self.state_for_console()
+        )
         self.settings_dialog.show()
         self.settings_dialog.raise_()
         self.settings_dialog.activateWindow()
@@ -759,7 +787,9 @@ class PetWindow(Live2DView):
                 notes.append(f"手机端切换失败：{exc}")
 
         # ---- 6) 刷新面板 + 气泡反馈 ----
-        self.settings_dialog.load_state(*self._settings_state())
+        self.settings_dialog.load_state(
+            *self._settings_state(), console=self.state_for_console()
+        )
         message = "设置已更新♪" + ("\n" + "· ".join(notes) if notes else "")
         self.bubble.show_message(message, "HAPPY", 6000)
 
@@ -817,22 +847,12 @@ class PetWindow(Live2DView):
         self.raise_()
         self._update_chrome()
         QTimer.singleShot(700, self._greet)
-        # 等首帧画完再量模型顶部（GL 上下文可用之后才有意义）
-        QTimer.singleShot(1300, self._measure_model_top)
+        # 等首帧画完再自动取景（GL 上下文可用之后读回来的 alpha 才有意义）。
+        # 不能放在 initializeGL 里：那时 QOpenGLWidget 的 FBO 还没准备好。
+        QTimer.singleShot(900, self._refit)
         # 上次退出时视频对话是开着的 → 恢复它（延后一点，先让窗口画出来）
         if self._video_enabled:
             QTimer.singleShot(1800, lambda: self.set_video_enabled(True))
-
-    def _measure_model_top(self) -> None:
-        """实测模型顶部，用于把角标按钮贴到初音头顶上方。"""
-        try:
-            top = self.measure_model_top()
-        except Exception as exc:  # noqa: BLE001
-            print(f"[UI] 测量模型顶部失败：{exc}")
-            return
-        if top:
-            self._model_top = top
-            self._layout_children()
 
     def _greet(self) -> None:
         self.set_emotion("HAPPY")
@@ -843,28 +863,121 @@ class PetWindow(Live2DView):
         self.bubble.show_message(GREETING, "HAPPY", autohide_ms=9000)
         self._layout_children()
 
+    # ---------------------------------------------------------------- 换模型
+    def apply_model(self, model_id: str) -> bool:
+        """切换桌面端模型（由控制台调用）。
+
+        两个模型的美术范围差很多（新模型的画布 3500x8888、美术还超出画布），
+        所以换完必须重新取景，否则会看到「只有一小块」。
+        """
+        if model_id == self.model_id:
+            return True
+        if self.speaking:
+            self.stop_speaking()
+        ok = self.load_model(model_id)
+        if not ok:
+            self.bubble.show_message("呜…这个模型没能加载，先留着原来那个吧", "SAD", 5000)
+            return False
+        models_catalog.select("desktop", model_id)
+        self._model_top = None
+        self._layout_children()
+        self._refit()
+        self.set_emotion("HAPPY")
+        self.bubble.show_message(
+            f"换好新衣服啦～ 现在是「{models_catalog.resolve(model_id)['name']}」", "HAPPY", 5000
+        )
+        return True
+
+    def set_watermark_visible(self, visible: bool) -> None:
+        self.watermark_visible = bool(visible)
+        super().set_watermark_visible(visible)
+
+    # ---------------------------------------------------------------- 控制台（= 设置窗口）
+    def open_console(self) -> None:
+        """打开控制台。
+
+        控制台就是设置窗口本身 —— 换模型、语音开关、完全退出都在里面，
+        不再单独做一个「主页」。桌宠角标 ⚙ 和托盘菜单都走这里。
+        """
+        self.open_settings()
+
+    def open_console_settings(self) -> None:
+        self.open_settings()
+
+    def refresh_console(self) -> None:
+        """把当前状态刷进设置窗口（换模型 / 手机端变动 / 显隐都会调）。"""
+        try:
+            self.settings_dialog.apply_console_state(self.state_for_console())
+        except Exception as exc:  # noqa: BLE001
+            print(f"[UI] 刷新设置窗口失败：{exc}")
+
+    def _on_pet_visibility(self, visible: bool) -> None:
+        self.settings_dialog.set_pet_visible(visible)
+
+    def state_for_console(self) -> dict:
+        """给控制台组装一份「现在是什么状态」。"""
+        info = self.model_info or {}
+        missing = [m["id"] for m in models_catalog.available() if not m["present"]]
+        phone_pref = models_catalog.selected("phone")
+        urls = list(self._remote_urls or [])
+        return {
+            "pet_visible": self.isVisible(),
+            "desktop_model": self.model_id,
+            "phone_model": phone_pref,
+            "missing_models": missing,
+            "watermark_param": self._wm_param,
+            "watermark_visible": bool(self.watermark_visible),
+            "model_text": (
+                f"{models_catalog.resolve(self.model_id)['name']}"
+                f"　({info.get('drawables', '-')} drawable / "
+                f"{len(info.get('expressions') or [])} 表情 / "
+                f"{len(info.get('motion_groups') or {})} 动作组)"
+            ),
+            "phone_text": (
+                f"{models_catalog.resolve(phone_pref)['name']}　"
+                + ("已开启：" + "  ".join(urls) if urls else "未开启（去设置里打开）")
+            ),
+            "voice_text": (
+                f"输出 {getattr(self.tts, 'engine', '-')} ({getattr(self.tts, 'status', '-')})"
+                f"　输入 {config.STT_TRANSCRIBER} ({getattr(self.stt, 'status', 'unknown')})"
+            ),
+            "session_text": f"#{self.session_id}（今天）" if self.session_id else "未初始化",
+        }
+
+    # ---------------------------------------------------------------- 退出
+    def prepare_shutdown(self) -> None:
+        """退出前的收尾（由 AppControl 调用，顺序由它统一负责）。
+
+        摄像头必须显式松开，否则指示灯会一直亮着；几何位置要存下来，
+        下次启动才能回到原处。
+        """
+        self.stop_speaking()
+        self._stop_camera()
+        self._save_geometry()
+
     def quit_app(self) -> None:
+        """完全退出。
+
+        统一交给 AppControl：它会按顺序停语音、停远程服务、收 TTS、销毁渲染器，
+        并武装一个看门狗 —— 只要有任何一步卡住，进程也会在 8 秒内被强制结束。
+        没有 AppControl（例如单独跑某个 tool）时退回本窗口自己收尾。
+        """
+        if self.app_control is not None:
+            self.app_control.quit_all("桌宠窗口")
+            return
         self.stop_speaking()
         self._save_geometry()
         self.tray.hide()
-        self.close()
+        self.shutdown()
         QApplication.quit()
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        self.stop_speaking()
-        self._save_geometry()
-        self._stop_camera()          # 先放掉摄像头，摄像头 LED 随之熄灭
-        # 注意 self.shutdown() 是 Live2DView 的，收的是渲染。
-        # TTS 的合成服务是独立进程，必须单独收掉，否则退出后它会被孤立，
-        # 一直占着约 1.5GB 显存不放。
-        if getattr(self, "tts", None) is not None:
-            try:
-                self.tts.shutdown()
-            except Exception as exc:  # noqa: BLE001
-                print(f"[TTS] 关闭合成服务失败：{exc}")
-        self.shutdown()
-        super().closeEvent(event)
-        # 关掉桌宠窗口就等于退出。app.setQuitOnLastWindowClosed(False) 是为托盘设的，
-        # 少了这一句的话，Alt+F4 / 任务栏关闭只会关掉窗口，进程会带着托盘图标
-        # 一直留在后台（还会占着显存）。
-        QApplication.quit()
+        """关闭窗口 = 完全退出。
+
+        为什么不是「最小化到托盘」：这个窗口是 Qt.Tool + 无边框，**不进任务栏**，
+        所以一旦只是隐藏，用户就再也找不到它了（这正是「窗口关了但应用没关」
+        那种困惑的来源）。真要说「暂时不想看」，托盘菜单和控制台都有显式的
+        「隐藏 Miku」，随时能叫回来。
+        """
+        event.accept()
+        self.quit_app()

@@ -372,3 +372,28 @@ Phase 5 模拟器 + 真机验收，出 APK
 
 PC 侧 Python 改动（`REMOTE_MODEL_DIR` + `/model/manifest`）随 Phase 2 一起做，
 改动面刻意压到最小以免影响现有桌宠。
+
+---
+
+## 14. 后续增补：双模型（已完成）
+
+原计划只让手机端用新模型、PC 桌宠继续用经典模型，靠 `REMOTE_MODEL_DIR`
+把两者**解耦**。后来需求变成「两个模型都保留，桌面端和手机端可以切换」，
+于是解耦方案被 `backend/models_catalog.py` 取代。要点：
+
+| 变化 | 说明 |
+| --- | --- |
+| 单一 `REMOTE_MODEL_DIR` → 模型清单 | `GET /model/list`、`GET /model/<id>/manifest`、`GET /model/<tail:.*>` |
+| 新增 `profile` 随清单下发 | 情绪→表情/倾角、水印参数由 PC 定义，手机端直接用，两端行为不可能不一致 |
+| 手机端缓存目录 | `files/miku_v5/` → `files/models/<id>/`（旧目录启动时自动清理） |
+| 手机端换模型 | 状态栏「模型 xx」按钮只发 `{"type":"set_model"}`，等 PC 广播 `config` 才真换（PC 是唯一权威） |
+| 取景 | 两端统一改为「画一帧 + 读 alpha 实测」；旧的顶点法在经典模型上会把模型算小一半 |
+| 页面入口 | 固定用 `/model/_active.model3.json` 与 `/model/__profile.json`，换模型时页面源码不用改 |
+
+旧 APK / 旧 `web/phone.html` 不受影响：`/model/manifest`（不带 id）与
+`/model/<相对路径>`（第一段不是已知 id）都保留为兼容写法。
+
+验收（真机，iQOO V2452A）：两个模型都能完整渲染并落在安全带内；手机上点
+「模型」按钮 → PC 日志 `请求切换模型 → miku`、`data/model_prefs.json` 落盘、
+手机重载并切到经典模型；文字对话与长按说话都在 `data/remote.log` 留下
+对话 / 转写 / 语音记录。详见 `docs/TECHNICAL.md` §5.11。

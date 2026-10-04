@@ -69,8 +69,32 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
     @Volatile
     private var lastStatus: Pair<String, String>? = null
 
+    /**
+     * 最近一次拿到的「可用模型清单」与「当前手机端模型」。
+     *
+     * 和 lastStatus 同一个道理：PC 的 `ready` 往往**早于**页面脚本就绪，
+     * 那时 `evaluateJavascript` 打过去是空放一炮 —— 结果就是状态栏上
+     * 那个「模型 xx」按钮永远不出现（真机实测踩到）。所以这里存一份补发。
+     *
+     * 清单和当前值**分开存**：换模型时 PC 只发 `config`（不带清单），
+     * 若把清单一起覆盖成空，重载页面后按钮就会消失。
+     */
+    @Volatile
+    private var lastModelsJson: String? = null
+
+    @Volatile
+    private var lastPhoneModel: String? = null
+
     /** 语音输入时是否自动附一张画面（对应 PC 的「视频对话」开关）。 */
     private var videoMode = false
+
+    /**
+     * 当前使用的 Live2D 模型 id。
+     *
+     * 初值取上次保存的；一旦连上 PC，就以 PC 下发的 `phone_model` 为准
+     * （PC 控制台是唯一权威，见 ui/settings_dialog.py 的「手机端模型」）。
+     */
+    private var activeModelId = AssetServer.DEFAULT_MODEL
 
     /** 模型同步的单飞锁：防止 onCreate 与 WS 就绪两处并发触发同一次同步。 */
     private val syncing = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -107,10 +131,14 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
         }
 
         assets = AssetServer(this)
+        // 先用上次用的模型起页面；连上 PC 后会以 PC 下发的为准
+        activeModelId = prefs.getString(KEY_MODEL, null) ?: AssetServer.DEFAULT_MODEL
+        assets.activeModelId = activeModelId
         capture = AudioCapture()
         // 口型包络直接喂给页面；30Hz 的频率 evaluateJavascript 扛得住
         player = AudioPlayer { level -> if (pageReady) bridge.onMouth(level) }
         sync = ModelSync(this)
+        sync.cleanupLegacyCache()
         photoTaker = PhotoTaker(this, this)
         remote = RemoteClient { event -> onRemoteEvent(event) }
 
@@ -156,7 +184,7 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
         hideSystemBars()
 
         Log.i(TAG, "入口 ${assets.indexUrl()}")
-        Log.i(TAG, "模型目录 ${sync.modelDir().absolutePath}")
+        Log.i(TAG, "模型目录 ${sync.modelDir(activeModelId).absolutePath}")
         webView.loadUrl(assets.indexUrl())
 
         // 恢复上次的 PC 地址；模拟器上直接给出宿主机地址，省掉手输
@@ -202,25 +230,37 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
      * **单飞保护**：本方法有两个触发点（onCreate 的首次连接、以及 WS 就绪后的补同步），
      * 真机上实测会**并发跑两次**，两个线程往同一个临时文件下载，一个搬走后另一个
      * 就「落盘失败」，导致整个同步中断、模型缺文件。模拟器上时序错开没撞上。
+     *
+     * @param reloadAfter 换模型时要重载整个页面：模型换了，PIXI 里那个
+     *   已经加载的实例没法「换皮」，重建页面是最干净的做法（而且页面自己
+     *   会在 onPageAlive 里重新请求加载）。
      */
-    private fun syncModel(host: String, port: Int) {
+    private fun syncModel(host: String, port: Int, reloadAfter: Boolean = false) {
         if (!syncing.compareAndSet(false, true)) {
             Log.i(TAG, "已有同步在进行，跳过本次触发")
             return
         }
         scope.launch {
             try {
+                val modelId = activeModelId
                 val result = withContext(Dispatchers.IO) {
-                    sync.sync(host, port) { p ->
+                    sync.sync(host, port, modelId) { p ->
                         bridge.onStatus("syncing", "模型 ${p.done}/${p.total}  ${p.percent}%")
                     }
                 }
                 when (result) {
                     is ModelSync.Result.Ready -> {
-                        Log.i(TAG, "模型就绪：下载 ${result.downloaded} 个，跳过 ${result.skipped} 个")
+                        Log.i(TAG, "模型就绪：${result.modelId} 下载 ${result.downloaded} 个，跳过 ${result.skipped} 个")
+                        assets.activeModelId = result.modelId
+                        assets.profileJson = result.profileJson
                         modelReady = true
                         bridge.onStatus("model_ready", "模型已就绪")
-                        if (pageReady) bridge.loadModel()
+                        if (reloadAfter) {
+                            pageReady = false
+                            webView.reload()
+                        } else if (pageReady) {
+                            bridge.loadModel()
+                        }
                     }
                     is ModelSync.Result.Failed -> {
                         Log.e(TAG, "模型同步失败: ${result.message}")
@@ -233,11 +273,35 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
         }
     }
 
+    /**
+     * 切到另一个模型：改本地状态 → 重新同步 → 重载页面。
+     *
+     * 模型文件按 id 分目录缓存，所以切回旧的模型几乎瞬间完成（清单比对上即命中）。
+     */
+    private fun switchModel(modelId: String, reason: String) {
+        if (modelId.isBlank() || modelId == activeModelId) return
+        Log.i(TAG, "切换模型 $activeModelId -> $modelId（$reason）")
+        activeModelId = modelId
+        assets.activeModelId = modelId
+        prefs.edit().putString(KEY_MODEL, modelId).apply()
+        modelReady = false
+        val host = prefs.getString(KEY_HOST, null) ?: return
+        syncModel(host, prefs.getInt(KEY_PORT, DEFAULT_PORT), reloadAfter = true)
+    }
+
     private fun onRemoteEvent(e: RemoteClient.Event) {
         when (e) {
             is RemoteClient.Event.Ready -> {
                 bridge.onProvider(e.provider.toString())
+                lastModelsJson = e.modelsJson
+                lastPhoneModel = e.phoneModel.ifBlank { activeModelId }
+                bridge.onModels(lastModelsJson ?: "[]", lastPhoneModel ?: activeModelId)
                 bridge.onStatus("connected", "已连接")
+                // PC 说的模型才算数（控制台是唯一权威）
+                if (e.phoneModel.isNotBlank() && e.phoneModel != activeModelId) {
+                    switchModel(e.phoneModel, "PC 下发")
+                    return
+                }
                 // 连上之前同步可能失败过（PC 刚起来、网络抖动）；
                 // 这里补一次，否则模型就永远不加载了。
                 if (!modelReady) {
@@ -245,6 +309,11 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
                     Log.i(TAG, "连接就绪但模型未就绪，重新同步")
                     syncModel(host, prefs.getInt(KEY_PORT, DEFAULT_PORT))
                 }
+            }
+            is RemoteClient.Event.Config -> {
+                lastPhoneModel = e.phoneModel
+                bridge.onModels(lastModelsJson ?: "[]", e.phoneModel)
+                switchModel(e.phoneModel, "PC 广播")
             }
             is RemoteClient.Event.Transcript -> bridge.onTranscript(e.text)
             is RemoteClient.Event.Reply -> bridge.onReply(e.text, e.emotion)
@@ -330,6 +399,20 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
         Log.i(TAG, "视频对话（说话时附一帧）${if (on) "开启" else "关闭"}")
     }
 
+    /**
+     * 手机界面上的模型按钮：只发请求，真正切换等 PC 用 `config` 广播回来。
+     *
+     * 为什么不本地直接切：PC 控制台也要显示「手机端现在用哪个模型」，
+     * 两边各切各的就会出现「手机上是新模型、控制台上写着经典模型」。
+     */
+    override fun onSetModel(id: String) {
+        if (id.isBlank()) return
+        if (id == activeModelId) return
+        Log.i(TAG, "请求 PC 切换到 $id")
+        bridge.onStatus("syncing", "正在切换模型…")
+        remote.sendSetModel(id)
+    }
+
     // 注意用块体而不是 `= remote.ping()`：ping() 返回 Boolean，
     // 表达式体会把返回类型推断成 Boolean，与接口声明的 Unit 不符。
     override fun onPing() {
@@ -362,6 +445,11 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
         // 连接可能早于页面加载完成，那样这条状态就丢了 —— 这里补发一次，
         // 否则界面会一直停在「连接你的 PC」上，看起来像没连上。
         lastStatus?.let { (state, detail) -> bridge.onStatus(state, detail) }
+        // 模型清单同理：ready 早于页面就绪时那次 JS 调用是空放的
+        val models = lastModelsJson
+        if (models != null) {
+            bridge.onModels(models, lastPhoneModel ?: activeModelId)
+        }
         if (modelReady) bridge.loadModel()
     }
 
@@ -425,6 +513,7 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
         private const val TAG = "MikuAgent"
         private const val KEY_HOST = "pc_host"
         private const val KEY_PORT = "pc_port"
+        private const val KEY_MODEL = "model_id"
 
         /**
          * 模拟器访问宿主机的固定地址；真机需要填 PC 的局域网 IP

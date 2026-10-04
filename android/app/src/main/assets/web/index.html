@@ -19,7 +19,14 @@
   }
   #dot { width: 8px; height: 8px; border-radius: 50%; background: #f59e0b; flex: none; }
   #dot.on { background: #39c5bb; } #dot.err { background: #ef4444; }
-  #engine { opacity: .75; margin-left: auto; font-size: 11px; }
+  #engine { opacity: .75; font-size: 11px; }
+  /* 模型切换：手机上也能换，和 PC 控制台是同一份选择（PC 广播回来才算数）。 */
+  #model {
+    position: fixed; top: 8px; right: 72px; z-index: 30;
+    font-size: 11px; line-height: 1; padding: 6px 10px; border-radius: 999px;
+    border: 1px solid rgba(57,197,187,.45); background: rgba(57,197,187,.16);
+    color: #7fe3da; font-family: inherit;
+  }
 
   /* 气泡 */
   #bubble {
@@ -49,7 +56,7 @@
      踩过的坑：按住麦克风说话时，长按会被 WebView 当成「选中文字」，
      弹出选择手柄并把录音打断。按钮和输入栏整体禁用选择；
      输入框和气泡要保持可选中/可滚动，所以只对 #bar 生效。 */
-  #bar, #bar *, #wm, #topbar {
+  #bar, #bar *, #wm, #model, #topbar {
     -webkit-user-select: none; user-select: none;
     -webkit-touch-callout: none;
     -webkit-tap-highlight-color: transparent;
@@ -97,11 +104,12 @@
 
 <div id="topbar">
   <span id="dot"></span><span id="status">初始化…</span>
-  <span id="engine"></span>
+  <span id="engine" style="margin-left:auto"></span>
 </div>
 
 <div id="bubble"><span id="chip"></span><div id="btext"></div></div>
 
+<button id="model" title="切换 Live2D 模型">模型</button>
 <button id="wm" title="水印开关（模型默认打开）">水印</button>
 
 <div id="bar">
@@ -131,35 +139,50 @@
 
 const $ = (id) => document.getElementById(id);
 const native = window.NativeBridge || null;
-const MODEL_URL = "/model/miku.model3.json";
+// 固定入口：AssetServer 把「当前模型的 model3.json」映射到这个虚拟路径。
+// 换模型时页面源码一个字都不用改，重载即可。
+const MODEL_URL = "/model/_active.model3.json";
+// 当前模型的渲染画像（情绪→表情/倾角、水印参数），由 PC 下发 →
+// 原生缓存 → 这里读。见 docs/TECHNICAL.md 与 backend/models_catalog.py。
+const PROFILE_URL = "/model/__profile.json";
 
 const EMOTION_CN = {
   HAPPY:"开心", SAD:"难过", ANGRY:"生气", SURPRISED:"惊讶",
   MOTIVATED:"元气", EMPATHY:"温柔", NORMAL:"平静",
 };
-// 情绪 → 头部倾角（度）。表情要等 model3.json 补全后才能用，倾角是兜底保证「有反应」。
-const EMOTION_TILT = {
-  HAPPY:-6, SAD:8, ANGRY:5, SURPRISED:-9, MOTIVATED:-4, EMPATHY:7, NORMAL:0,
-};
-// 情绪 → 该模型自带的表情名。
-// 这些名字来自模型自带的 miku.vtube.json 热键表（原生侧在内存里补进 model3.json）：
-// 圈圈 / 脸红 / 前倾 / 葱 / 唱歌 / 比心 / QQ人 / 水印
-const EMOTION_EXPR = {
-  HAPPY: "比心", SURPRISED: "圈圈", MOTIVATED: "唱歌",
-  EMPATHY: "脸红", ANGRY: "前倾", SAD: null, NORMAL: null,
-};
-// 水印（「模型所属：玄宝 / 禁止商用 / 非商业使用」那几行叠字）。
-//
-// 这个模型里 Param137=1 表示**隐藏**水印、0 表示显示（实测标定：
-// Param137=1 时画面纯白像素 8 个，=0 时 1897~2781 个）。模型的自然状态是
-// Param137=0，也就是水印默认显示 —— 这正是模型说明第 4 条「水印按键默认打开」。
-//
-// 为什么不用「水印」表情来控制：那个 exp3 只是把 Param137 加 1，
-// 而表情在切换情绪时会被整体重置，水印就会重新冒出来。而且实测
-// model.expression([...]) 传数组时它并不生效（字符串形式才生效），
-// 想跟情绪表情叠加也做不到。所以直接像口型那样驱动参数，最可靠。
-const WM_PARAM = "Param137";
+
+// 下面三张表在拿到画像之前是空的，由 applyProfile() 填。
+// 为什么不写死在页面里：PC 桌面端与手机端用**同一份**画像
+// （backend/models_catalog.py），两端行为才不会各走各的
+// —— 以前这里硬编码过新模型的表情名，换回经典模型时就会全部失效。
+let EMOTION_TILT = {};
+let EMOTION_EXPR = {};
+/** 水印参数（如 Param137）。为空表示这个模型没有水印，按钮直接藏起来。 */
+let WM_PARAM = "";
+let WM_HIDDEN_VALUE = 1;
+let WM_SHOWN_VALUE = 0;
 let watermarkHidden = localStorage.getItem("miku_watermark_hidden") !== "0";
+/** 可用模型清单，由 PC 在 ready/config 里下发。 */
+let MODELS = [];
+let currentModel = "";
+
+function applyProfile(p) {
+  if (!p || typeof p !== "object") return;
+  EMOTION_TILT = p.emotion_tilt || {};
+  EMOTION_EXPR = p.emotion_expression || {};
+  if (p.watermark_param) {
+    WM_PARAM = p.watermark_param;
+    WM_HIDDEN_VALUE = Number(p.watermark_hidden_value ?? 1);
+    WM_SHOWN_VALUE = Number(p.watermark_shown_value ?? 0);
+  } else {
+    // 经典模型没有水印参数 —— 把按钮藏掉，别给用户一个点了没反应的开关
+    WM_PARAM = "";
+  }
+  const btn = $("wm");
+  if (btn) btn.style.display = WM_PARAM ? "" : "none";
+  console.log("PROFILE tilt=" + JSON.stringify(EMOTION_TILT) +
+    " expr=" + JSON.stringify(EMOTION_EXPR) + " wm=" + (WM_PARAM || "none"));
+}
 
 let app = null, model = null, core = null;
 let pendingImage = null;
@@ -186,6 +209,26 @@ function setWatermark(hidden) {
     btn.classList.toggle("off", watermarkHidden);
     btn.textContent = watermarkHidden ? "水印 关" : "水印";
   }
+}
+
+/** 状态栏上的模型名 + 「点一下换模型」。清单和当前值都由 PC 下发。 */
+function renderModelButton() {
+  const btn = $("model");
+  if (!btn) return;
+  const cur = MODELS.find((m) => m.id === currentModel);
+  btn.textContent = cur ? ("模型 " + (cur.short || cur.name)) : "";
+  btn.style.display = MODELS.length > 1 ? "" : "none";
+}
+
+function cycleModel() {
+  if (MODELS.length < 2) return;
+  const order = MODELS.map((m) => m.id);
+  const i = Math.max(0, order.indexOf(currentModel));
+  const next = order[(i + 1) % order.length];
+  // 只发请求：真正切换等 PC 广播 config 回来，这样 PC 控制台和所有手机一致
+  showBubble("正在换成「" + ((MODELS.find((m) => m.id === next) || {}).name || next) + "」…", "NORMAL");
+  setStatus("切换模型中…");
+  native && native.setModel && native.setModel(next);
 }
 
 // 贴图诊断：pixi-live2d-display 不同版本把 textures 挂在 internalModel 上，
@@ -230,12 +273,25 @@ function bubbleBottom() {
 }
 
 // ---------------------------------------------------------------- Live2D
+/** 取当前模型的渲染画像（情绪映射 / 水印参数）。拿不到就用空表，页面照常渲染。 */
+async function loadProfile() {
+  try {
+    const r = await fetch(PROFILE_URL, { cache: "no-store" });
+    if (r.ok) applyProfile(await r.json());
+    else console.warn("画像返回 " + r.status);
+  } catch (e) {
+    console.warn("取画像失败: " + e.message);
+  }
+}
+
 async function loadModel() {
   if (model) return;
   try {
     if (!window.PIXI) throw new Error("pixi.min.js 未加载");
     if (!window.Live2DCubismCore) throw new Error("Cubism Core 未加载");
     if (!PIXI.live2d) throw new Error("cubism4.min.js 未加载");
+
+    await loadProfile();
 
     const v = Live2DCubismCore.Version.csmGetVersion();
     setStatus("加载模型… (Core " + (v>>>24) + "." + ((v>>>16)&255) + ")");
@@ -264,7 +320,8 @@ async function loadModel() {
 
     // 水印：默认隐藏（用户明确要求去掉）。模型说明第 4 条是「默认打开、
     // 可在表情设置里关闭」—— 这里保留了开关，想恢复显示点右上角即可。
-    setWatermark(watermarkHidden);
+    // 没有水印参数的模型（经典模型）applyProfile 已经把按钮藏掉了。
+    if (WM_PARAM) setWatermark(watermarkHidden);
 
     // 恢复上次的视频对话开关状态（默认关，和 PC 的默认一致）
     applyVideoMode();
@@ -305,25 +362,65 @@ function reportFail(msg) {
   native && native.failed && native.failed(msg);
 }
 
-// 模型美术的真实包围盒，只算一次。
+// ------------------------------------------------------- 取景（实测渲染像素）
 //
-// 为什么不能用 getLocalBounds()：那个返回的是**画布**（3500x8888），
-// 但这个模型的美术**超出了画布范围**（长发等），而且角色在画布内也不居中。
-// 按画布适配的后果实测就是：右侧被裁掉一截、左边留一大片空白。
+// 为什么不用 getDrawableVertices() 量：那个只给**几何**范围，不管那块几何
+// 到底有没有被画出来。经典模型实测就踩到 —— 顶点算出来的美术框顶部有
+// 1600 多画布像素是空的，于是模型被判定为「很高」，缩放系数算小一半，
+// 人整个缩到屏幕下半部分（真机截图确认：y 38~363 这一段一个像素都没有）。
 //
-// getDrawableVertices() 返回的是「画布像素 / PixelsPerUnit」单位的坐标，
-// 且原点在**画布中心**，所以要换算回画布像素：
-//     canvasX = CanvasWidth/2 + vx * PixelsPerUnit
-let artBox = null;   // 单位：画布像素
+// 所以两边（PC 原生 / 手机 WebGL）统一成同一套办法：**画一帧、读回来、
+// 按 alpha 求包围盒**。这样量到的就是屏幕上真实存在的东西。
+//
+// 坐标关系（pixi-live2d-display）：屏幕 = model.position + 本地坐标 * model.scale，
+// 是严格线性的，所以只要在某个已知 scale 上量一次，就能反推出本地美术范围。
 
-function measureArtBounds() {
-  const cw = model.internalModel.width;    // 画布像素宽（3500）
-  const ch = model.internalModel.height;   // 画布像素高（8888）
-  const unitsW = core.getCanvasWidth();    // 同一画布的「单位」宽（约 0.7415）
+function touchesEdge(box, w, h, slack) {
+  return box.minX <= slack || box.minY <= slack ||
+         box.maxX >= w - slack || box.maxY >= h - slack;
+}
+
+/**
+ * 美术在**模型本地坐标**里的范围，只量一次。
+ * 本地范围是模型固有属性（与窗口大小无关），所以能安全缓存。
+ */
+let artLocal = null;
+
+/** 直接读 WebGL 帧缓冲的 alpha，返回美术包围盒（CSS 像素，原点左上）。 */
+function measureRenderedBox() {
+  const gl = app.renderer.gl;
+  const W = app.renderer.width, H = app.renderer.height;
+  const res = app.renderer.resolution;
+  app.renderer.render(app.stage);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  const buf = new Uint8Array(W * H * 4);
+  gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+
+  let minX = 1e9, maxX = -1e9, minY = 1e9, maxY = -1e9;
+  for (let y = 0; y < H; y++) {
+    // GL 原点在左下：行号要翻过来
+    const base = (H - 1 - y) * W * 4;
+    for (let x = 0; x < W; x++) {
+      if (buf[base + x * 4 + 3] > 8) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+  if (maxX < minX || maxY < minY) return null;
+  return { minX: minX / res, minY: minY / res, maxX: maxX / res, maxY: maxY / res };
+}
+
+/** 兜底：渲染测量失败时退回顶点法（会偏，但总比不摆强）。 */
+function measureArtBoundsByVertices() {
+  const cw = model.internalModel.width;
+  const ch = model.internalModel.height;
+  const unitsW = core.getCanvasWidth();
   if (!(unitsW > 0)) return null;
-  const ppu = cw / unitsW;                 // 4720
-  const ox = cw / 2, oy = ch / 2;          // 画布原点在中心
-
+  const ppu = cw / unitsW;
+  const ox = cw / 2, oy = ch / 2;
   let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
   const n = core.getDrawableCount();
   for (let i = 0; i < n; i++) {
@@ -331,8 +428,7 @@ function measureArtBounds() {
     try { v = core.getDrawableVertices(i); } catch (e) { continue; }
     if (!v || !v.length) continue;
     for (let k = 0; k < v.length; k += 2) {
-      const x = ox + v[k] * ppu;
-      const y = oy + v[k + 1] * ppu;
+      const x = ox + v[k] * ppu, y = oy + v[k + 1] * ppu;
       if (x < minX) minX = x;
       if (x > maxX) maxX = x;
       if (y < minY) minY = y;
@@ -340,50 +436,105 @@ function measureArtBounds() {
     }
   }
   if (!isFinite(minX) || maxX <= minX) return null;
-  console.log("ART_BOUNDS " + JSON.stringify({
-    x: [Math.round(minX), Math.round(maxX)], y: [Math.round(minY), Math.round(maxY)],
-    w: Math.round(maxX - minX), h: Math.round(maxY - minY),
-    canvas: [cw, ch], ppu: Math.round(ppu),
-  }));
-  return { minX, maxX, minY, maxY };
+  return { minX, minY, maxX, maxY, local: true };
+}
+
+function availRect() {
+  const w = app.renderer.width / app.renderer.resolution;
+  const h = app.renderer.height / app.renderer.resolution;
+  // topPad 要跟着**气泡的实际高度**走 —— 长回复时气泡能占到 34vh，
+  // 固定值会让模型被压在气泡底下（用户报过「回复太长会挡住头部」）。
+  const padX = 10;
+  return {
+    x0: padX, x1: w - padX,
+    y0: Math.max(38, bubbleBottom() + 8),
+    y1: h - 86,
+  };
+}
+
+function applyLayout(s, artCx, artCy, avail) {
+  model.scale.set(s);
+  model.position.set(
+    (avail.x0 + avail.x1) / 2 - artCx * s,
+    (avail.y0 + avail.y1) / 2 - artCy * s,
+  );
 }
 
 function layout() {
   if (!model || !app) return;
+  const avail = availRect();
+  const availW = Math.max(1, avail.x1 - avail.x0);
+  const availH = Math.max(1, avail.y1 - avail.y0);
   const w = app.renderer.width / app.renderer.resolution;
   const h = app.renderer.height / app.renderer.resolution;
 
-  if (!artBox) artBox = measureArtBounds();
-  if (!artBox) return;
+  // 动画会让包围盒抖动，量之前先停掉动作；量完 ticker 会自己把待机接回去
+  let mm = model.internalModel && model.internalModel.motionManager;
+  try { mm && mm.stopAllMotions && mm.stopAllMotions(); } catch (e) {}
 
-  // 可用区域：避开顶部状态条与底部输入栏。
-  // topPad 要跟着**气泡的实际高度**走 —— 长回复时气泡能占到 34vh，
-  // 固定值会让模型被压在气泡底下（用户报过「回复太长会挡住头部」）。
-  const padX = 10;
-  const topPad = Math.max(38, bubbleBottom() + 8);
-  const bottomPad = 86;
-  const availX0 = padX, availX1 = w - padX;
-  const availY0 = topPad, availY1 = h - bottomPad;
-  const availW = Math.max(1, availX1 - availX0);
-  const availH = Math.max(1, availY1 - availY0);
+  let s, artCx, artCy, artW, artH, method = "rendered";
 
-  // 按**美术**尺寸缩放，而不是画布尺寸
-  const artW = artBox.maxX - artBox.minX;
-  const artH = artBox.maxY - artBox.minY;
-  const s = Math.min(availW / artW, availH / artH);
-  model.scale.set(s);
+  if (artLocal) {
+    // 已经量过一次了：本地美术范围是模型的固有属性，不用再量一遍。
+    // 这一步很值钱 —— 每次读 720x1600 的帧缓冲大约十几毫秒，
+    // 而 layout() 在气泡出现/消失、窗口旋转时都会被调用。
+    ({ w: artW, h: artH, cx: artCx, cy: artCy } = artLocal);
+    method = "cached";
+  } else {
+    // 1) 缩到很小、摆到原点，量出美术在**本地坐标**里的真实范围
+    let k = 0.05, box = null;
+    for (let i = 0; i < 6; i++) {
+      model.scale.set(k);
+      model.position.set(0, 0);
+      box = measureRenderedBox();
+      if (box && !touchesEdge(box, w, h, 1.5)) break;
+      box = null;
+      k *= 0.5;
+      console.log("首次测量贴边，缩到 k=" + k);
+    }
 
-  // 让美术包围盒的中心落在可用区中心
-  const artCx = (artBox.minX + artBox.maxX) / 2;
-  const artCy = (artBox.minY + artBox.maxY) / 2;
-  model.position.set(
-    (availX0 + availX1) / 2 - artCx * s,
-    (availY0 + availY1) / 2 - artCy * s,
-  );
+    if (box) {
+      artW = (box.maxX - box.minX) / k;
+      artH = (box.maxY - box.minY) / k;
+      artCx = (box.minX + box.maxX) / 2 / k;
+      artCy = (box.minY + box.maxY) / 2 / k;
+    } else {
+      const fb = measureArtBoundsByVertices();
+      if (!fb) { console.warn("取景失败：渲染测量与顶点测量都没拿到包围盒"); return; }
+      method = "vertices(fallback)";
+      artW = fb.maxX - fb.minX;
+      artH = fb.maxY - fb.minY;
+      artCx = (fb.minX + fb.maxX) / 2;
+      artCy = (fb.minY + fb.maxY) / 2;
+    }
+    artLocal = { w: artW, h: artH, cx: artCx, cy: artCy };
+  }
 
-  console.log("LAYOUT s=" + s.toFixed(4) +
-    " artCss=" + Math.round(artW * s) + "x" + Math.round(artH * s) +
+  // 2) 按可用区算目标缩放，并让美术中心落在可用区中心
+  s = Math.min(availW / artW, availH / artH);
+  applyLayout(s, artCx, artCy, avail);
+
+  // 3) 复测一次做闭环校正：变换是线性的，一轮就够收敛
+  const after = measureRenderedBox();
+  if (after) {
+    const gotW = after.maxX - after.minX, gotH = after.maxY - after.minY;
+    const k2 = Math.min(availW / Math.max(1, gotW), availH / Math.max(1, gotH));
+    if (k2 > 0.9 && k2 < 1.1) s *= k2;
+    const cx = (after.minX + after.maxX) / 2, cy = (after.minY + after.maxY) / 2;
+    applyLayout(
+      s,
+      artCx + ((avail.x0 + avail.x1) / 2 - cx) / s,
+      artCy + ((avail.y0 + avail.y1) / 2 - cy) / s,
+      avail,
+    );
+  }
+
+  const last = measureRenderedBox();
+  console.log("FIT(" + method + ") s=" + s.toFixed(4) +
+    " artLocal=" + Math.round(artW) + "x" + Math.round(artH) +
     " avail=" + Math.round(availW) + "x" + Math.round(availH) +
+    " 实测=" + (last ? (Math.round(last.maxX - last.minX) + "x" + Math.round(last.maxY - last.minY) +
+      " @(" + Math.round(last.minX) + "," + Math.round(last.minY) + ")") : "?") +
     " screen=" + Math.round(w) + "x" + Math.round(h));
 }
 
@@ -418,8 +569,9 @@ function bindParamWriter() {
     return;
   }
   model.internalModel.on("beforeModelUpdate", () => {
-    // 水印：Param137=1 隐藏、0 显示。放这里驱动，就不受情绪表情切换影响。
-    setParam(WM_PARAM, watermarkHidden ? 1 : 0);
+    // 水印：参数名与取值都由画像给（Param137=1 隐藏、0 显示）。
+    // 放这里驱动，就不受情绪表情切换影响。
+    if (WM_PARAM) setParam(WM_PARAM, watermarkHidden ? WM_HIDDEN_VALUE : WM_SHOWN_VALUE);
     // 口型：原生侧按**真实播放进度**（AudioTrack.playbackHeadPosition）算好的 RMS 包络。
     // 上升快、下降慢，观感更像说话而不是抽搐。
     mouthNow += (mouthNow < window.__mouth ? 0.55 : 0.25) * (window.__mouth - mouthNow);
@@ -468,6 +620,15 @@ window.Miku = {
       const p = JSON.parse(json);
       $("engine").textContent = (p.llm||"?") + " · TTS:" + (p.tts||"?") + " · STT:" + (p.stt||"?");
     } catch (e) {}
+  },
+  /** PC 下发可用模型清单 + 当前选中的那个。 */
+  onModels(json, current) {
+    try {
+      const list = JSON.parse(json);
+      if (Array.isArray(list) && list.length) MODELS = list.filter((m) => m.present !== false);
+      if (current) currentModel = current;
+      renderModelButton();
+    } catch (e) { console.warn("模型清单解析失败: " + e.message); }
   },
   onStatus(state, detail) {
     const map = { connected:"已连接", connecting:"连接中…", disconnected:"已断开，重连中…",
@@ -564,11 +725,16 @@ $("video").onclick = () => {
   showBubble(videoMode ? "视频对话打开啦～以后你说话时我会顺便看一眼☆" : "视频对话关掉了哦", "NORMAL");
 };
 
-// 水印开关。模型里 Param137=1 是隐藏，默认隐藏；想显示回来点一下。
+// 水印开关。Param137=1 是隐藏，默认隐藏；想显示回来点一下。
 $("wm").onclick = () => {
+  if (!WM_PARAM) return;
   setWatermark(!watermarkHidden);
   showBubble(watermarkHidden ? "水印关掉了哦" : "水印开回来啦～", "NORMAL");
 };
+
+// 模型切换（手机端入口；PC 控制台上也能改同一个选择）
+$("model").onclick = cycleModel;
+renderModelButton();
 
 $("connect").onclick = () => {
   const h = $("host").value.trim();

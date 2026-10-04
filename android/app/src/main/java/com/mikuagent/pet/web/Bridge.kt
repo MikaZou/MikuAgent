@@ -38,6 +38,13 @@ class Bridge(
         fun onTakePhoto(): String
         /** 手机端「视频对话」开关：说话时是否自动附一帧画面 */
         fun onSetVideoMode(on: Boolean)
+        /**
+         * 手机上换 Live2D 模型。
+         *
+         * 只是**请求**，不直接改本地状态：真正的切换等 PC 用 `config` 广播回来
+         * 才做，这样 PC 控制台和所有手机的显示永远一致。
+         */
+        fun onSetModel(id: String)
         /** 页面脚本**初始化完成**（与「模型渲染成功」是两件事） */
         fun onPageAlive()
         /** 页面自己也需要知道连接状态时用 */
@@ -94,6 +101,9 @@ class Bridge(
     fun setVideoMode(on: Boolean) = actions.onSetVideoMode(on)
 
     @JavascriptInterface
+    fun setModel(id: String) = actions.onSetModel(id.trim())
+
+    @JavascriptInterface
     fun ready(info: String) {
         Log.i(TAG, "RENDER_READY $info")
         actions.onPageReady(info)
@@ -124,6 +134,20 @@ class Bridge(
 
     fun onProvider(json: String) =
         callJs("window.Miku && Miku.onProvider($json)")
+
+    /**
+     * 可用模型清单 + 当前选中的那个（PC 端下发）。
+     *
+     * 页面用它在状态栏显示模型名，并提供「点一下换模型」的入口 ——
+     * 手机上能换，PC 控制台上也能换，两边是同一份选择。
+     *
+     * ⚠️ 清单必须用 [q] 包成**字符串**再传：直接塞 JSON 文本的话，
+     * JS 收到的是一个真数组，页面里的 `JSON.parse()` 会把它变成
+     * `"[object Object]"` 然后解析失败 —— 表现就是模型按钮永远不出现
+     * （真机实测踩到，日志里是 `模型清单解析失败: Unexpected token 'o'`）。
+     */
+    fun onModels(json: String, current: String) =
+        callJs("window.Miku && Miku.onModels && Miku.onModels(${q(json)}, ${q(current)})")
 
     /** 语音播完了，让页面把状态收回「已就绪」。 */
     fun onSpeechEnd() = callJs("window.Miku && Miku.onSpeechEnd && Miku.onSpeechEnd()")

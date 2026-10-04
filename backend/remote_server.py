@@ -47,11 +47,9 @@ from typing import Optional
 from aiohttp import WSMsgType, web
 
 import config
+import models_catalog
 
 WEB_DIR = config.BASE_DIR / "web"
-# 手机端拉取的模型目录。刻意用 REMOTE_MODEL_DIR 而不是 MODEL_PATH.parent：
-# 手机端可以指向新模型（moc3 v5），而 PC 桌宠继续用旧模型，互不影响。
-MODEL_DIR = config.REMOTE_MODEL_DIR
 
 
 def _log(msg: str) -> None:
@@ -104,7 +102,8 @@ class RemoteServer:
     在独立线程里跑自己的 asyncio 事件循环，与 Qt 主线程互不干扰。
     """
 
-    def __init__(self, agent, tts, stt, memory, on_ready=None) -> None:
+    def __init__(self, agent, tts, stt, memory, on_ready=None,
+                 on_phone_model=None) -> None:
         self.agent = agent
         self.tts = tts
         self.stt = stt
@@ -112,11 +111,17 @@ class RemoteServer:
         self.port = config.REMOTE_PORT
         # 服务就绪后回调（在服务线程里调用，UI 侧需自行切回主线程）
         self.on_ready = on_ready
+        # 手机端自己换了模型时回调（同样在服务线程里）
+        self.on_phone_model = on_phone_model
         self.urls: list[str] = []
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._runner: Optional[web.AppRunner] = None
         self._clients = 0
+        # 活着的 WebSocket，用于「PC 控制台改了手机端模型 → 主动推给手机」。
+        # 手机是在**下载模型之前**就会收到这条消息的，所以推送必须可靠，
+        # 不能只在连接建立那一刻发一次（那时用户可能还没改）。
+        self._sockets: set = set()
         self._log_path = Path(config.DATA_DIR) / "remote.log"
 
     def _write_log(self, msg: str) -> None:
@@ -140,16 +145,33 @@ class RemoteServer:
         app.router.add_get("/", self._handle_index)
         app.router.add_get("/ws", self._handle_ws)
         app.router.add_get("/health", self._handle_health)
-        # ⚠️ 必须注册在 add_static("/model/") **之前**：aiohttp 按注册顺序匹配，
-        # 排在后面的话 /model/manifest 会被静态处理器接走，变成 404。
+        # ⚠️ 路由**按注册顺序匹配**，字面量必须排在带 {model} 的模板之前，
+        # 否则 /model/list 会被 /model/{model}/manifest 之类的规则接走（踩过 404）。
+        app.router.add_get("/model/list", self._handle_model_list)
+        # 旧版 APK 只会请求 /model/manifest（不带模型 id），保留它是为了
+        # 「先升级 PC、手机 APK 慢慢升」不会互相打断。
         app.router.add_get("/model/manifest", self._handle_manifest)
+        app.router.add_get("/model/{model}/manifest", self._handle_manifest)
+        app.router.add_get("/model/{tail:.*}", self._handle_model_file)
         # 手机端要用的静态资源
         app.router.add_static("/static/", WEB_DIR, show_index=False)
-        app.router.add_static("/model/", MODEL_DIR, show_index=False)
         return app
 
     @staticmethod
-    def _scan_model_dir() -> list[dict]:
+    def _model_entry(model_id: str) -> Optional[dict]:
+        """把 URL 里的模型 id 解析成目录条目（找不到返回 None）。"""
+        entry = models_catalog.get(model_id)
+        if entry is None:
+            return None
+        folder = Path(entry["dir"])
+        if not folder.is_dir():
+            return None
+        entry = dict(entry)
+        entry["folder"] = folder
+        return entry
+
+    @staticmethod
+    def _scan_model_dir(folder: Path) -> list[dict]:
         """列出模型目录里的文件：相对路径、字节数、sha1。
 
         为什么需要哈希而不是「文件存在就跳过」：手机端下载中断会留下**半截
@@ -159,7 +181,7 @@ class RemoteServer:
 
         items: list[dict] = []
         try:
-            paths = sorted(p for p in MODEL_DIR.rglob("*") if p.is_file())
+            paths = sorted(p for p in folder.rglob("*") if p.is_file())
         except OSError as exc:  # noqa: BLE001
             _log(f"扫描模型目录失败：{exc}")
             return items
@@ -176,22 +198,81 @@ class RemoteServer:
                 continue
             items.append({
                 # 统一用 posix 分隔符，手机端直接拼 URL 即可
-                "path": path.relative_to(MODEL_DIR).as_posix(),
+                "path": path.relative_to(folder).as_posix(),
                 "size": size,
                 "sha1": digest.hexdigest(),
             })
         return items
 
+    async def _handle_model_list(self, request: web.Request) -> web.Response:
+        """可用模型清单，供 PC 控制台与手机端选择。"""
+        return web.json_response({
+            "models": models_catalog.available(),
+            "phone_model": models_catalog.selected("phone"),
+        })
+
     async def _handle_manifest(self, request: web.Request) -> web.Response:
-        """模型清单，供手机端增量同步与完整性校验。"""
-        files = await asyncio.to_thread(self._scan_model_dir)
+        """模型清单，供手机端增量同步与完整性校验。
+
+        路径两种写法都支持：
+            /model/manifest              → 用手机端当前选中的模型
+            /model/<id>/manifest         → 指定模型
+        profile 一并带过去，这样手机端的情绪→表情映射、水印参数
+        与 PC 用的是**同一份**数据，不会再出现两端行为不一致。
+        """
+        requested = request.match_info.get("model") or models_catalog.selected("phone")
+        entry = self._model_entry(requested)
+        if entry is None:
+            return web.json_response(
+                {"error": f"没有这个模型：{requested}", "models": models_catalog.ids()},
+                status=404,
+            )
+        files = await asyncio.to_thread(self._scan_model_dir, entry["folder"])
         total = sum(f["size"] for f in files)
         return web.json_response({
-            "root": MODEL_DIR.name,
+            "id": entry["id"],
+            "name": entry["name"],
+            "root": entry["folder"].name,
+            "model3": entry["model3"],
             "count": len(files),
             "total": total,
+            "profile": entry.get("profile") or {},
             "files": files,
         })
+
+    async def _handle_model_file(self, request: web.Request) -> web.StreamResponse:
+        """提供模型文件。两种 URL 形状都吃：
+
+            /model/<id>/<相对路径>      新版 APK / 新版网页（多模型）
+            /model/<相对路径>           旧版网页 phone.html（单模型时代）
+
+        为什么不用 add_static：静态目录只能挂一个根，而这里有两套模型，
+        而且「用哪套」可以在设置窗口里随时改。旧写法靠「第一段不是已知
+        模型 id 就当成相对路径」来兼容 —— 这样已经装在手机上的旧页面
+        不用改也能继续用。
+        """
+        tail = request.match_info.get("tail", "")
+        parts = tail.split("/", 1)
+        entry = self._model_entry(parts[0])
+        if entry is not None:
+            folder = entry["folder"]
+            rel = parts[1] if len(parts) > 1 else ""
+        else:
+            folder = self._model_entry(models_catalog.selected("phone"))
+            if folder is None:
+                raise web.HTTPNotFound(text="手机端选中的模型不存在")
+            folder = folder["folder"]
+            rel = tail
+
+        root = folder.resolve()
+        target = (root / rel).resolve()
+        # 防目录穿越：解析后的绝对路径必须仍在该模型目录之内
+        if target != root and root not in target.parents:
+            _log(f"拒绝目录穿越：{rel}")
+            raise web.HTTPNotFound(text="非法路径")
+        if not target.is_file():
+            raise web.HTTPNotFound(text="文件不存在")
+        return web.FileResponse(target)
 
     async def _handle_health(self, request: web.Request) -> web.Response:
         return web.json_response({
@@ -233,10 +314,18 @@ class RemoteServer:
         )
         await ws.prepare(request)
         self._clients += 1
+        self._sockets.add(ws)
         peer = request.remote
         _log(f"客户端接入 {peer}（当前 {self._clients} 个）")
         try:
-            await ws.send_json({"type": "ready", "provider": self.provider_info()})
+            await ws.send_json({
+                "type": "ready",
+                "provider": self.provider_info(),
+                # 手机该用哪个模型由 PC 决定（控制台里改），连着一起下发，
+                # 手机端拿到后自己去 /model/<id>/manifest 同步。
+                "phone_model": models_catalog.selected("phone"),
+                "models": models_catalog.available(),
+            })
             async for msg in ws:
                 if msg.type == WSMsgType.TEXT:
                     await self._on_message(ws, msg.data, peer)
@@ -245,6 +334,7 @@ class RemoteServer:
                     break
         finally:
             self._clients -= 1
+            self._sockets.discard(ws)
             _log(f"客户端断开 {peer}（剩余 {self._clients} 个）")
         return ws
 
@@ -263,6 +353,21 @@ class RemoteServer:
                 await self._do_chat(ws, req, peer)
             elif kind == "audio":
                 await self._do_audio(ws, req, peer)
+            elif kind == "set_model":
+                # 手机端自己换模型（界面上的模型按钮）→ 写回 PC 的选择，
+                # 再广播给所有客户端，让 PC 控制台和别的手机跟着一致。
+                model_id = req.get("id") or ""
+                if models_catalog.get(model_id) is None:
+                    await ws.send_json({"type": "error", "message": f"未知模型 {model_id}"})
+                else:
+                    models_catalog.select("phone", model_id)
+                    _log(f"{peer} 请求切换模型 → {model_id}")
+                    await self.broadcast_model(model_id)
+                    if self.on_phone_model is not None:
+                        try:
+                            self.on_phone_model(model_id)
+                        except Exception as exc:  # noqa: BLE001
+                            _log(f"on_phone_model 回调失败：{exc}")
             else:
                 await ws.send_json({"type": "error", "message": f"未知类型 {kind}"})
         except Exception as exc:  # noqa: BLE001
@@ -271,6 +376,28 @@ class RemoteServer:
                 await ws.send_json({"type": "error", "message": str(exc)})
             except Exception:  # noqa: BLE001
                 pass
+
+    async def broadcast_model(self, model_id: str) -> None:
+        """把「手机端该用哪个模型」推给所有在线客户端。"""
+        payload = {"type": "config", "phone_model": model_id}
+        for ws in list(self._sockets):
+            try:
+                await ws.send_json(payload)
+            except Exception:  # noqa: BLE001
+                self._sockets.discard(ws)
+
+    def push_model(self, model_id: str) -> None:
+        """从别的线程（Qt 主线程）请求广播。
+
+        WebSocket 只能在它自己那个事件循环里发，所以这里把协程丢回去。
+        """
+        loop = self._loop
+        if loop is None:
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(self.broadcast_model(model_id), loop)
+        except Exception as exc:  # noqa: BLE001
+            _log(f"推送模型切换失败：{exc}")
 
     async def _do_chat(self, ws, req: dict, peer: str) -> None:
         text = (req.get("text") or "").strip()
@@ -481,12 +608,13 @@ class RemoteController:
     「端口被占用」而静默失败。
     """
 
-    def __init__(self, agent, tts, stt, memory, on_ready=None) -> None:
+    def __init__(self, agent, tts, stt, memory, on_ready=None, on_phone_model=None) -> None:
         self._agent = agent
         self._tts = tts
         self._stt = stt
         self._memory = memory
         self._on_ready = on_ready
+        self._on_phone_model = on_phone_model
         self._server = None
         self._port = None
         self._lock = threading.Lock()
@@ -525,13 +653,28 @@ class RemoteController:
 
     def _start_locked(self, port: int) -> bool:
         server = RemoteServer(
-            self._agent, self._tts, self._stt, self._memory, on_ready=self._on_ready
+            self._agent, self._tts, self._stt, self._memory,
+            on_ready=self._on_ready,
+            on_phone_model=self._on_phone_model,
         )
         if not server.start():
             return False
         self._server = server
         self._port = port
         return True
+
+    def set_phone_model(self, model_id: str) -> None:
+        """PC 控制台改了手机端模型 → 推给所有在线手机。
+
+        只写选择、不重启服务：模型是按 id 提供文件的，换 id 不需要动端口。
+        选择没变就直接返回 —— 别让手机白白重新同步一遍模型。
+        """
+        if not models_catalog.select("phone", model_id):
+            return
+        server = self._server
+        if server is not None:
+            server.push_model(model_id)
+        _log(f"手机端模型已切到 {model_id}")
 
     def _stop_locked(self) -> None:
         server = self._server

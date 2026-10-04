@@ -26,6 +26,11 @@ import java.io.IOException
  * 页面源是 `https://appassets.androidplatform.net/...`，这是 WebViewAssetLoader
  * 约定的本地域，用它是因为 **https 才是安全上下文**（浏览器版 phone.html
  * 就是因为 http://192.168.x.x 拿不到麦克风）。
+ *
+ * 关于**换模型**：两套模型各自的文件都放在 `files/models/<id>/` 下，
+ * 这里通过 [activeModelId] 决定当前把哪个目录暴露成 `/model/`。
+ * 页面始终请求固定地址 `/model/_active.model3.json`，所以换模型时
+ * 页面不需要知道模型叫什么、目录在哪 —— 换完只要重载页面即可。
  */
 class AssetServer(private val context: Context) {
 
@@ -38,13 +43,31 @@ class AssetServer(private val context: Context) {
     @Volatile
     var textureScale: Double = 1.0
 
-    /** 模型目录。优先应用私有目录，其次外部私有目录（方便 adb push 联调）。 */
+    /** 当前使用的模型 id（等于 `files/models/<id>` 的目录名）。 */
+    @Volatile
+    var activeModelId: String = DEFAULT_MODEL
+
+    /**
+     * 当前模型的渲染画像（情绪→表情、水印参数…），由 ModelSync 从 PC 的
+     * `/model/<id>/manifest` 里取回来，原样喂给页面。
+     *
+     * 为什么把 profile 从 PC 传过来而不是在页面上写死：PC 桌面端与手机端
+     * 用的是同一份画像（backend/models_catalog.py），这样「电脑上会脸红、
+     * 手机上不会」这种两端不一致根本不可能发生。
+     */
+    @Volatile
+    var profileJson: String = "{}"
+
+    /** 模型目录：优先内部私有目录，其次外部私有目录（方便 adb push 联调）。 */
     val modelDir: File
         get() {
-            val internal = File(context.filesDir, MODEL_DIR_NAME)
-            if (internal.isDirectory) return internal
-            val external = context.getExternalFilesDir(null)?.let { File(it, MODEL_DIR_NAME) }
-            if (external != null && external.isDirectory) return external
+            val internal = File(File(context.filesDir, MODELS_ROOT), activeModelId)
+            if (internal.isDirectory && internal.listFiles()?.isNotEmpty() == true) return internal
+            val external = context.getExternalFilesDir(null)
+                ?.let { File(File(it, MODELS_ROOT), activeModelId) }
+            if (external != null && external.isDirectory && external.listFiles()?.isNotEmpty() == true) {
+                return external
+            }
             return internal   // 不存在时返回内部路径，交给 ModelSync 去创建
         }
 
@@ -67,9 +90,18 @@ class AssetServer(private val context: Context) {
      */
     private inner class ModelPathHandler : WebViewAssetLoader.PathHandler {
         override fun handle(path: String): android.webkit.WebResourceResponse? {
-            val root = modelDir.canonicalFile
-            val target = File(root, path).canonicalFile
+            // 两个虚拟文件：页面用固定地址取「当前模型的 model3.json」和它的画像。
+            // 这样换模型时页面源码一个字都不用改。
+            if (path == PROFILE_PATH) return jsonResponse(currentProfile())
 
+            val root = modelDir.canonicalFile
+            val effective = if (path == ACTIVE_MODEL3) activeModel3Name(root) else path
+            if (effective == null) {
+                Log.w(TAG, "当前模型目录里找不到 model3.json：${root.absolutePath}")
+                return notFound()
+            }
+
+            val target = File(root, effective).canonicalFile
             if (!target.path.startsWith(root.path + File.separator) && target != root) {
                 Log.w(TAG, "拒绝目录穿越: $path")
                 return notFound()
@@ -98,11 +130,39 @@ class AssetServer(private val context: Context) {
         }
     }
 
+    /** 当前模型目录里 model3.json 的真实文件名（两套模型可能不重名）。 */
+    private fun activeModel3Name(root: File): String? =
+        root.listFiles { f -> f.isFile && f.name.endsWith(".model3.json") }
+            ?.minByOrNull { it.name }
+            ?.name
+
+    /**
+     * 当前模型的画像。内存里没有（PC 连不上、用的本地缓存）就退回磁盘缓存。
+     *
+     * 磁盘那份是 ModelSync 同步成功时顺手写的，所以「离线也能用对情绪映射」。
+     */
+    private fun currentProfile(): String {
+        val inMemory = profileJson
+        if (inMemory.isNotBlank() && inMemory != "{}") return inMemory
+        return try {
+            val f = File(modelDir, PROFILE_FILE)
+            if (f.isFile) f.readText(Charsets.UTF_8) else "{}"
+        } catch (e: Exception) {
+            Log.w(TAG, "读画像缓存失败：${e.message}")
+            "{}"
+        }
+    }
+
+    private fun jsonResponse(body: String): android.webkit.WebResourceResponse =
+        android.webkit.WebResourceResponse(
+            null, "application/json", ByteArrayInputStream(body.toByteArray(Charsets.UTF_8))
+        ).apply { setStatusCodeAndReasonPhrase(200, "OK") }
+
     /**
      * 在**内存里**给 model3.json 补上 Expressions / Motions，磁盘文件一个字节都不动。
      *
-     * 为什么需要：这个模型（`D:\game\miku`）的 `model3.json` 里
-     * `Motions` 和 `Expressions` **都是空的** —— 9 个表情是独立的 `.exp3` 文件，
+     * 为什么需要：新模型（`models/miku_v5`）的 `model3.json` 里
+     * `Motions` 和 `Expressions` **都是空的** —— 8 个表情是独立的 `.exp3` 文件，
      * VTube Studio 靠自己的 `miku.vtube.json` 热键表去加载它们。标准 Cubism
      * 运行时不会自动发现这些文件，于是 `model.expression("圈圈")` 找不到东西。
      *
@@ -117,9 +177,7 @@ class AssetServer(private val context: Context) {
             Log.w(TAG, "补全 model3.json 失败，回退原始内容：${e.message}")
             raw
         }
-        return android.webkit.WebResourceResponse(
-            null, "application/json", ByteArrayInputStream(patched.toByteArray(Charsets.UTF_8))
-        ).apply { setStatusCodeAndReasonPhrase(200, "OK") }
+        return jsonResponse(patched)
     }
 
     private fun patchModelJson(raw: String, dir: File?): String {
@@ -130,20 +188,22 @@ class AssetServer(private val context: Context) {
         // ---- 表情：从 vtube.json 的热键表还原 ----
         val haveExp = refs.optJSONArray("Expressions")
         if (haveExp == null || haveExp.length() == 0) {
+            val pairs = readVtubeExpressions(dir)
             val arr = org.json.JSONArray()
-            for ((name, f) in readVtubeExpressions(dir)) {
+            for ((name, f) in pairs) {
                 arr.put(org.json.JSONObject().put("Name", name).put("File", f))
             }
             if (arr.length() > 0) {
                 refs.put("Expressions", arr)
-                Log.i(TAG, "补全 ${arr.length()} 个表情：${readVtubeExpressions(dir).joinToString { it.first }}")
+                Log.i(TAG, "补全 ${arr.length()} 个表情：${pairs.joinToString { it.first }}")
             }
         }
 
         // ---- 动作：目录里扫到的 *.motion3.json 挂到 Idle 组 ----
         val haveMot = refs.optJSONObject("Motions")
         if (haveMot == null || haveMot.length() == 0) {
-            val files = dir?.listFiles { f -> f.isFile && f.name.endsWith(".motion3.json") } ?: emptyArray()
+            val files = dir?.listFiles { f -> f.isFile && f.name.endsWith(".motion3.json") }
+                ?: emptyArray()
             if (files.isNotEmpty()) {
                 val arr = org.json.JSONArray()
                 for (f in files) arr.put(org.json.JSONObject().put("File", f.name))
@@ -224,7 +284,7 @@ class AssetServer(private val context: Context) {
         scaled.compress(Bitmap.CompressFormat.PNG, 100, out)
         scaled.recycle()
 
-        Log.i(TAG, "贴图降采样 ${file.name}: ${bounds.outWidth} -> ${wantW} (sample=$sample, ${out.size() / 1024} KB)")
+        Log.i(TAG, "贴图降采样 ${file.name}: ${bounds.outWidth} -> $wantW (sample=$sample, ${out.size() / 1024} KB)")
         return android.webkit.WebResourceResponse(
             null, "image/png", ByteArrayInputStream(out.toByteArray())
         ).apply { setStatusCodeAndReasonPhrase(200, "OK") }
@@ -251,7 +311,19 @@ class AssetServer(private val context: Context) {
         /** WebViewAssetLoader 约定的本地域；必须是 https 才是安全上下文。 */
         const val DOMAIN = "appassets.androidplatform.net"
 
-        /** 模型目录名，与 PC 端 REMOTE_MODEL_DIR 的 basename 保持一致。 */
-        const val MODEL_DIR_NAME = "miku_v5"
+        /** 多套模型共同的父目录名（PC 端 /model/list 里的 id 就是它的子目录名）。 */
+        const val MODELS_ROOT = "models"
+
+        /** 默认模型：与 PC 端 models_catalog.DEFAULT_ID 保持一致。 */
+        const val DEFAULT_MODEL = "miku_v5"
+
+        /** 虚拟路径：当前模型的 model3.json。页面用它当固定入口。 */
+        private const val ACTIVE_MODEL3 = "_active.model3.json"
+
+        /** 虚拟路径：当前模型的渲染画像。 */
+        private const val PROFILE_PATH = "__profile.json"
+
+        /** 画像的磁盘缓存文件名，与 ModelSync 约定一致。 */
+        private const val PROFILE_FILE = "_profile.json"
     }
 }

@@ -1,123 +1,108 @@
-"""测量模型在指定窗口尺寸下的逻辑包围盒，用于精确摆放气泡与模型。
+"""测量模型在指定窗口尺寸下的取景结果与安全区落位。
 
 用法:
-    python tools/measure_framing.py [宽] [高]
+    .venv\\Scripts\\python.exe tools/measure_framing.py [宽] [高] [模型id]
 
-输出每行：(scale, dy) -> 模型 top/bottom/宽/高（逻辑像素），
-并标出能完整落在「气泡下方 ~ 输入栏上方」安全区里的配置。
+背景变化（重要）：桌面端以前是**查表**取景的 —— 按窗口高度查一张手工量好的
+(气泡高, scale, dy) 表。那张表只对经典模型成立，加第二个模型（moc3 v5，
+美术超出画布）就完全跑偏。现在 `Live2DView.auto_frame()` 会实测取景：
+画几帧、读回 alpha 包围盒、反推 scale 与 offset。
+
+所以这个工具也换了职责：不再扫描 (scale, dy) 组合去挑一组能用的，
+而是**复述自动取景实际算出了什么、落位是否符合预期** —— 改布局常量、
+换窗口尺寸、加新模型之后，用它一眼确认没有压到气泡或输入栏。
+
+输出：
+    .diag/framing_<模型id>.png   取景结果截图
+    控制台：安全区、实测包围盒、溢出量
 """
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
+sys.path.insert(0, str(BASE / "backend"))
+
 OUT = BASE / ".diag"
 OUT.mkdir(exist_ok=True)
 
-import numpy as np
-import live2d.v3 as live2d
-from PIL import Image
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtOpenGLWidgets import QOpenGLWidget
-from PySide6.QtWidgets import QApplication
+import OpenGL.GL as gl  # noqa: E402
+import live2d.v3 as live2d  # noqa: E402
+import numpy as np  # noqa: E402
+from PySide6.QtCore import QRect  # noqa: E402
+from PySide6.QtWidgets import QApplication  # noqa: E402
 
-MODEL = BASE / "assets" / "live2d" / "miku" / "miku.model3.json"
-TMP = OUT / "bbox_probe.png"
+import config  # noqa: E402
+import models_catalog  # noqa: E402
+from ui.pet_window import (  # noqa: E402
+    BAR_H, BAR_MARGIN, BUBBLE_GAP, BUBBLE_MAX, BUBBLE_MIN, BUBBLE_RATIO, BUBBLE_TOP,
+)
+from ui.live2d_view import Live2DView  # noqa: E402
 
-W = int(sys.argv[1]) if len(sys.argv) > 1 else 400
-H = int(sys.argv[2]) if len(sys.argv) > 2 else 580
-
-# 垂直分区（与 ui/pet_window.py 保持一致）
-BUBBLE_TOP = 46
-BUBBLE_MAX_H = 188
-SAFE_TOP = BUBBLE_TOP + BUBBLE_MAX_H + 6
-SAFE_BOTTOM = H - 76     # 输入栏顶边
-
-CONFIGS = [(s, dy) for s in (0.70, 0.75, 0.80, 0.85, 0.90) for dy in (0.0, 0.15, 0.30)]
+W = int(sys.argv[1]) if len(sys.argv) > 1 else config.WINDOW_WIDTH
+H = int(sys.argv[2]) if len(sys.argv) > 2 else config.WINDOW_HEIGHT
+MODEL_ID = sys.argv[3] if len(sys.argv) > 3 else models_catalog.selected("desktop")
 
 
-class Probe(QOpenGLWidget):
-    def __init__(self) -> None:
-        super().__init__()
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool)
-        self.resize(W, H)
-        self.m = None
-
-    def initializeGL(self):
-        live2d.glInit()
-        self.m = live2d.LAppModel()
-        self.m.LoadModelJson(str(MODEL))
-        self.m.SetAutoBlinkEnable(False)
-        self.m.SetAutoBreathEnable(False)
-
-    def resizeGL(self, w, h):
-        if self.m:
-            self.m.Resize(w, h)
-
-    def paintGL(self):
-        live2d.clearBuffer(0, 0, 0, 0)
-        if self.m:
-            self.m.Update()
-            self.m.Draw()
-
-    def bbox(self):
-        self.grabFramebuffer().save(str(TMP))
-        arr = np.array(Image.open(TMP).convert("RGBA"))[:, :, 3]
-        ys, xs = np.where(arr > 8)
-        if len(xs) == 0:
-            return None
-        dpr = arr.shape[1] / W
-        return (int(xs.min() / dpr), int(ys.min() / dpr),
-                int(xs.max() / dpr), int(ys.max() / dpr))
+def safe_area() -> QRect:
+    """与 PetWindow._avail_rect() 同一套算法（气泡下沿 ~ 输入栏上沿）。"""
+    bubble_max = int(max(BUBBLE_MIN, min(BUBBLE_MAX, H * BUBBLE_RATIO)))
+    top = BUBBLE_TOP + bubble_max + BUBBLE_GAP
+    bottom = H - BAR_H - BAR_MARGIN - BUBBLE_GAP
+    return QRect(16, top, W - 32, max(1, bottom - top))
 
 
 def main() -> int:
     live2d.init()
-    app = QApplication([])
-    w = Probe()
-    w.show()
-    st = {"i": -1, "phase": "settle", "ticks": 0}
+    app = QApplication(sys.argv[:1])
+    view = Live2DView(MODEL_ID, fps=60)
+    view.resize(W, H)
+    view.show()
+    end = time.time() + 1.5
+    while time.time() < end:
+        app.processEvents()
+        time.sleep(0.01)
 
-    print(f"窗口 {W}x{H}   安全区 y in [{SAFE_TOP}, {SAFE_BOTTOM}]")
-    print(f"{'scale':>6} {'dy':>6} | {'top':>5} {'bottom':>7} {'宽':>5} {'高':>5} | 是否合适")
-    print("-" * 62)
+    area = safe_area()
+    ok = view.auto_frame(area)
+    end = time.time() + 0.4
+    while time.time() < end:
+        app.processEvents()
+        time.sleep(0.01)
 
-    def tick():
-        if st["i"] >= 0 and st["phase"] == "measure":
-            b = w.bbox()
-            sc, dy = CONFIGS[st["i"]]
-            if b:
-                top, bot, width, height = b[1], b[3], b[2] - b[0], b[3] - b[1]
-                if top >= SAFE_TOP and bot <= SAFE_BOTTOM:
-                    mark = "OK 完全避开"
-                else:
-                    mark = f"溢出(顶缺{max(0, SAFE_TOP - top)}/底超{max(0, bot - SAFE_BOTTOM)})"
-                print(f"{sc:6.2f} {dy:6.2f} | {top:>5} {bot:>7} {width:>5} {height:>5} | {mark}", flush=True)
-            else:
-                print(f"{sc:6.2f} {dy:6.2f} | EMPTY", flush=True)
-            st["phase"] = "settle"
-            st["ticks"] = 0
-            return
-        st["ticks"] += 1
-        if st["phase"] == "settle" and st["ticks"] >= 3:
-            st["i"] += 1
-            if st["i"] >= len(CONFIGS):
-                app.quit()
-                return
-            sc, dy = CONFIGS[st["i"]]
-            w.m.SetScale(sc)
-            w.m.SetOffset(0.0, dy)
-            st["phase"] = "measure"
-            st["ticks"] = 0
-        w.update()
+    box = view.model_box
+    print(f"\n模型        : {MODEL_ID}  ({models_catalog.resolve(MODEL_ID)['name']})")
+    print(f"窗口        : {W}x{H}")
+    print(f"安全区      : x {area.left()}..{area.right()}  y {area.top()}..{area.bottom()}")
+    print(f"自动取景    : {'成功' if ok else '失败'}"
+          f"  scale={view.framing_scale:.4f} offset=({view.framing_offset[0]:.4f}, {view.framing_offset[1]:.4f})")
+    if not box:
+        print("实测包围盒  : 无（模型没画出来？）")
+        return 1
+    rect = [round(v) for v in box]
+    print(f"实测包围盒  : x {rect[0]}..{rect[2]}  y {rect[1]}..{rect[3]}"
+          f"  ({rect[2] - rect[0]}x{rect[3] - rect[1]})")
+    over = {
+        "左": area.left() - box[0], "上": area.top() - box[1],
+        "右": box[2] - area.right(), "下": box[3] - area.bottom(),
+    }
+    worst = max(over.values())
+    print("溢出安全区  : " + "  ".join(f"{k} {v:+.0f}" for k, v in over.items())
+          + f"   → 最大 {worst:+.0f}px")
+    if worst > 8:
+        print("⚠️  溢出超过 8px：动画中间态可能压到气泡或输入栏，考虑缩小安全区或调整常量")
+    else:
+        print("✅ 落位正常（动画中间态允许几像素溢出，安全带外还留着 BUBBLE_GAP 余量）")
 
-    t = QTimer()
-    t.timeout.connect(tick)
-    t.start(30)
-    app.exec()
+    png = OUT / f"framing_{MODEL_ID}.png"
+    view.grabFramebuffer().save(str(png))
+    print(f"截图        : {png}")
+    view.shutdown()
+    view.close()
+    app.quit()
     live2d.dispose()
     return 0
 

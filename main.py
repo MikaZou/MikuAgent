@@ -2,6 +2,11 @@
 
 用法：
     .venv\\Scripts\\python.exe main.py
+
+启动顺序（顺序是有意义的）：
+    首次设置向导 → 控制台 → 桌宠窗口 → 远程服务
+控制台先出现，因为换模型 / 完全退出这些入口都收在那儿；
+桌宠窗口是无边框置顶的，先弹它会把控制台压在下面。
 """
 from __future__ import annotations
 
@@ -78,7 +83,8 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("MikuAgent")
     app.setApplicationDisplayName("MikuAgent · 初音未来桌宠")
-    # 关掉最后一个窗口不退出：桌宠主要靠托盘活着
+    # 关掉所有窗口不退出：桌宠靠托盘 + 控制台活着。
+    # 「完全退出」走 ui/app_control.py 里那条显式路径，不依赖这个开关。
     app.setQuitOnLastWindowClosed(False)
 
     # ---- 首次启动向导（必须在读 config 之前）----
@@ -90,7 +96,10 @@ def main() -> int:
     from memory import MemoryStore
     from stt import SpeechToText
     from tts import TextToSpeech
+    import models_catalog
+    from ui.app_control import AppControl
     from ui.pet_window import PetWindow
+    from ui.settings_dialog import SettingsDialog
 
     memory = MemoryStore(config.DB_PATH)
 
@@ -106,8 +115,44 @@ def main() -> int:
     tts = TextToSpeech()
     stt = SpeechToText()
 
+    # ---- 桌宠窗口（模型来自 data/model_prefs.json，默认新模型）----
     window = PetWindow(memory, agent, stt, tts)
-    window.start()
+    window.set_watermark_visible(SettingsDialog.watermark_visible())
+
+    # ---- 控制台 = 设置窗口（先于桌宠出现）----
+    console = window.settings_dialog
+    control = AppControl(app, window=window, console=console, tts=tts)
+    window.app_control = control
+
+    def change_phone_model(model_id: str) -> None:
+        """手机端模型由 PC 决定：写选择 + 推给已连接的手机。
+
+        **必须幂等**：`select()` 返回 False 表示选择没变，这时候什么都不做。
+        否则手机会被推着重新同步一遍模型并重载页面（贴图 30MB），
+        而实际上它已经在用这个模型了。
+        """
+        if not models_catalog.select("phone", model_id):
+            return
+        remote = getattr(window, "remote_controller", None)
+        if remote is not None:
+            try:
+                remote.set_phone_model(model_id)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[Settings] 通知手机端失败：{exc}")
+        window.refresh_console()
+
+    def change_watermark(visible: bool) -> None:
+        SettingsDialog.set_watermark_visible(visible)
+        window.set_watermark_visible(visible)
+        window.refresh_console()
+
+    console.pet_visibility_requested.connect(window.tray.set_visible)
+    console.reconfigure_requested.connect(window.open_reconfigure)
+    console.quit_requested.connect(lambda: control.quit_all("设置窗口"))
+    console.desktop_model_changed.connect(window.apply_model)
+    console.phone_model_changed.connect(change_phone_model)
+    console.watermark_changed.connect(change_watermark)
+    window.model_loaded.connect(lambda _info: window.refresh_console())
 
     # ---- 远程服务（路线 A：手机当瘦客户端连到这里）----
     # 起不来只打日志，绝不影响桌宠本身
@@ -118,31 +163,43 @@ def main() -> int:
         from remote_server import RemoteController
 
         class _RemoteBridge(QObject):
-            """把服务线程的「就绪」事件排队回主线程。
+            """把服务线程的事件排队回主线程。
 
             服务跑在独立线程，直接碰 Qt 控件不安全；signal/slot 会走
             queued connection，自动切回 GUI 线程。
             """
 
             ready = Signal(list, dict)
+            phone_model = Signal(str)
 
         bridge = _RemoteBridge()
         bridge.ready.connect(window.on_remote_ready)
+        # 手机那边自己换了模型也要让控制台跟着变（两边显示不一致会很困惑）
+        bridge.phone_model.connect(lambda _mid: window.refresh_console())
         # 必须留引用，否则 QObject 被回收、信号断掉
         window._remote_bridge = bridge
 
         remote = RemoteController(
             agent, tts, stt, memory,
             on_ready=lambda urls, info: bridge.ready.emit(urls, info),
+            on_phone_model=lambda mid: bridge.phone_model.emit(mid),
         )
         remote.sync()
         # 设置面板改完配置要能启停远程服务，所以把控制器交给窗口
         window.remote_controller = remote
+        control.remote = remote
     except Exception as exc:  # noqa: BLE001
         print(f"[Remote] 启动失败（不影响桌宠）：{exc}")
 
+    # ---- 先控制台（设置窗口）、后桌宠 ----
+    window.open_settings()
+    window.start()
+
     code = app.exec()
 
+    # 正常路径走到这里说明事件循环已经退出了；把看门狗撤掉，
+    # 免得它 8 秒后又在日志里喊一句「没能正常退出」。
+    control.cancel_watchdog()
     if remote is not None:
         try:
             remote.stop()

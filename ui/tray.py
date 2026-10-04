@@ -1,4 +1,4 @@
-"""系统托盘：显示/隐藏、设置、退出（网页版没有的能力）。"""
+"""系统托盘：显示/隐藏、控制台、设置、完全退出（网页版没有的能力）。"""
 from __future__ import annotations
 
 from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap
@@ -23,23 +23,39 @@ def make_tray_icon() -> QIcon:
 
 
 class Tray:
-    """封装 QSystemTrayIcon 与右键菜单。"""
+    """封装 QSystemTrayIcon 与右键菜单。
 
-    def __init__(self, window, on_settings, on_quit) -> None:
+    菜单里刻意把「隐藏 Miku」和「完全退出」分开写清楚：
+    桌宠窗口是无边框、不进任务栏的，用户没法像普通程序那样从任务栏把它找回来，
+    所以这两个动作必须一眼能分辨 —— 混淆的后果就是「关了窗口但进程还在」。
+    """
+
+    def __init__(
+        self,
+        window,
+        on_settings,
+        on_quit,
+        on_console=None,
+        on_visibility=None,
+    ) -> None:
         self.icon = QSystemTrayIcon(make_tray_icon(), window)
         self.icon.setToolTip("MikuAgent · 初音未来桌宠")
 
         menu = QMenu()
         self.act_toggle = QAction("隐藏 Miku", menu)
+        act_console = QAction("打开控制台…", menu)
         act_settings = QAction("设置…", menu)
         act_center = QAction("回到屏幕中央", menu)
-        act_quit = QAction("退出", menu)
+        act_quit = QAction("完全退出", menu)
+        act_quit.setToolTip("停掉语音、松开摄像头、释放显存并退出整个进程")
 
         self.act_toggle.triggered.connect(self._toggle)
+        act_console.triggered.connect(on_console or (lambda: None))
         act_settings.triggered.connect(on_settings)
         act_center.triggered.connect(lambda: window.center_on_screen())
         act_quit.triggered.connect(on_quit)
 
+        menu.addAction(act_console)
         menu.addAction(self.act_toggle)
         menu.addAction(act_center)
         menu.addSeparator()
@@ -50,6 +66,7 @@ class Tray:
         self.icon.setContextMenu(menu)
         self.icon.activated.connect(self._on_activated)
         self._window = window
+        self._on_visibility = on_visibility
 
     def _on_activated(self, reason) -> None:
         from PySide6.QtWidgets import QSystemTrayIcon as T
@@ -58,13 +75,18 @@ class Tray:
             self._toggle()
 
     def _toggle(self) -> None:
-        if self._window.isVisible():
-            self._window.hide()
-            self.act_toggle.setText("显示 Miku")
-        else:
+        self.set_visible(not self._window.isVisible())
+
+    def set_visible(self, visible: bool) -> None:
+        if visible:
             self._window.show()
             self._window.raise_()
             self.act_toggle.setText("隐藏 Miku")
+        else:
+            self._window.hide()
+            self.act_toggle.setText("显示 Miku")
+        if self._on_visibility is not None:
+            self._on_visibility(bool(visible))
 
     def show(self) -> None:
         self.icon.show()
