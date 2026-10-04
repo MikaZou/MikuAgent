@@ -203,7 +203,11 @@ class SyncClient(private val store: MemoryStore) {
     private fun humanError(e: Throwable): String {
         val msg = e.message.orEmpty()
         return when {
-            msg.contains("Failed to connect") || msg.contains("ECONNREFUSED") ->
+            // 真机上 PC 没开时 OkHttp 报的是 "unexpected end of stream on http://…"
+            // （adb reverse 端口后面没有监听者时的表现），不是教科书里的 ECONNREFUSED
+            msg.contains("Failed to connect") || msg.contains("ECONNREFUSED") ||
+                msg.contains("unexpected end of stream") || msg.contains("stream was reset") ||
+                msg.contains("Connection refused", ignoreCase = true) ->
                 "连不上 PC（它没开？还是手机不在同一网络？）"
             msg.contains("UnknownHost") -> "找不到 PC 的地址"
             msg.contains("timeout", ignoreCase = true) -> "同步超时"
