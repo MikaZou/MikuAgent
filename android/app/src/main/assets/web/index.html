@@ -269,16 +269,20 @@
   </div>
 </div>
 
-<div id="setup">
-  <h2>连接你的 PC</h2>
-  <p>Miku 的大脑跑在 PC 上。请填 PC 的局域网地址<br>
-     （PC 端气泡里会显示，形如 <code>192.168.20.102</code>；<br>
-     安卓模拟器请填 <code>10.0.2.2</code>）</p>
+<div id="setup" class="hide">
+  <h2>第一次使用，选一种方式</h2>
+  <p><b>① 用手机自己的大脑（推荐）</b><br>
+     填一次 API Key 就能用，之后 <b>PC 可以一直不开</b></p>
+  <p style="opacity:.6">— 或者 —</p>
+  <p><b>② 连接 PC</b><br>
+     填 PC 的局域网地址（PC 端气泡里会显示，形如 <code>192.168.20.102</code>；<br>
+     安卓模拟器请填 <code>10.0.2.2</code>），AI 与语音都跑在电脑上</p>
   <input id="host" inputmode="url" placeholder="192.168.20.102" autocomplete="off">
   <input id="port" inputmode="numeric" placeholder="8765" autocomplete="off"
          style="max-width:320px;margin-top:8px">
-  <button class="go" id="connect">连接</button>
-  <p style="font-size:12px;opacity:.6">端口默认 8765</p>
+  <button class="go" id="connect">连接 PC</button>
+  <button class="go" id="setup_key">用手机自己的大脑（去填 Key）</button>
+  <button id="setup_skip" style="background:none;border:none;color:#8b9aa3;font-size:13px">以后再说</button>
 </div>
 
 <!-- 全部本地加载，零 CDN。顺序不能变：Core 必须在 cubism4 之前。 -->
@@ -846,7 +850,9 @@ window.Miku = {
     if (state === "retry") { setStatus(detail || "重试中…", "err"); return; }
     if (state === "model_ready") return;
     setStatus(map[state] || state, state === "failed" ? "err" : (state === "connected" ? "on" : ""));
+    // 连上了当然就不用再让人填地址；独立模式下则由 syncSetupVisibility 判定
     if (state === "connected") $("setup").classList.add("hide");
+    else syncSetupVisibility();
   },
   onError(msg) {
     // 出错也要把状态复位，否则会停在「转写中…／思考中…」装作还在忙
@@ -952,6 +958,7 @@ function renderBrainList(st) {
       if (id === cur) return;
       native && native.setBrainMode && native.setBrainMode(id);
       closeSettings();
+      syncSetupVisibility();
       showBubble("对话已切到「" + name + "」", "NORMAL");
     };
     box.appendChild(el);
@@ -1002,6 +1009,46 @@ function deviceState() {
   } catch (e) { return {}; }
 }
 
+/**
+ * 「第一次使用」浮层该不该显示。
+ *
+ * 只在**真的什么都没配置**时出现：既没有 PC 地址、也没有 DeepSeek Key。
+ * 任何一种配好了它就该消失 —— 它是首次配置的入口，不是每次启动必经的门。
+ *
+ * 早先它是无条件显示、只在收到 `connected` 状态时隐藏，那在「手机独立运行」
+ * 成为默认之后就变成了阻断性 bug：独立模式不连 WebSocket，浮层永远挡在前面，
+ * 点哪儿都没反应（真机上就是这么卡住的）。
+ *
+ * 「以后再说」会把选择记进 localStorage，免得每次开 App 都拦一次。
+ */
+function syncSetupVisibility() {
+  const el = $("setup");
+  if (!el) return;
+  const st = deviceState();
+  const skipped = localStorage.getItem("miku_setup_skipped") === "1";
+  const need = !st.host && !st.hasDeepseekKey && !skipped;
+  el.classList.toggle("hide", !need);
+}
+
+$("setup_skip").onclick = () => {
+  localStorage.setItem("miku_setup_skipped", "1");
+  $("setup").classList.add("hide");
+  showBubble("之后在 ⚙ 设置里随时能配～", "NORMAL");
+};
+
+$("setup_key").onclick = () => {
+  // 走「手机自己的大脑」：记下选择，直接把人送到 API 配置那一栏
+  localStorage.setItem("miku_setup_skipped", "1");
+  $("setup").classList.add("hide");
+  native && native.setBrainMode && native.setBrainMode("api");
+  setTimeout(() => {
+    openSettings();
+    const box = $("settings").querySelector(".sbody");
+    const cfg = $("sdk");
+    if (cfg && box) box.scrollTop = cfg.getBoundingClientRect().top + box.scrollTop - 120;
+  }, 60);
+};
+
 /** 「立即同步」：按完等它跑完再刷新面板（没有同步完成事件，靠 lastSyncAt 变化）。 */
 function syncNow() {
   const before = (deviceState().sync || {}).lastSyncAt || 0;
@@ -1035,6 +1082,7 @@ $("ssavecfg").onclick = () => {
   $("sdk").value = "";
   $("smm").value = "";
   renderApiConfig();
+  syncSetupVisibility();
   showBubble("API 配置已保存☆", "HAPPY");
 };
 
@@ -1045,6 +1093,7 @@ $("simportcfg").onclick = () => {
   if (String(used).startsWith("ERR")) { showBubble("导入失败：" + used, "SAD"); return; }
   $("scfgpaste").value = "";
   renderApiConfig();
+  syncSetupVisibility();
   showBubble("导入 " + String(used).split(",").length + " 个字段", "HAPPY");
 };
 
@@ -1189,6 +1238,9 @@ window.addEventListener("unhandledrejection", (e) =>
 
 try {
   console.log("页面脚本就绪");
+  // 「第一次使用」浮层只在真的什么都没配时出现。放在这里而不是让它默认可见：
+  // 默认可见 + 只在 connected 时隐藏 = 独立模式下永远挡住界面（真机踩到过）。
+  syncSetupVisibility();
   // 告诉原生「JS 起来了」——与「模型渲染成功」是两件事。
   // 原生收到后才会下发 loadModel()，所以这一步不能等到模型加载完再调。
   native && native.pageAlive && native.pageAlive();
