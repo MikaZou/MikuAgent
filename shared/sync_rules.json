@@ -1,0 +1,117 @@
+{
+  "_readme": [
+    "双端记忆同步的**规则契约**。PC（backend/sync_rules.py）与手机（MergeRules.kt）",
+    "都必须满足这里的每一条；两边的测试都读这个文件（tools/test_sync_rules.py、",
+    "MergeRulesTest.kt）。写在这里而不是各写一份测试，是因为「合并规则两边不一致」",
+    "的表现是最难查的一类 bug：两端各自都「对」，只是一个覆盖了另一个，",
+    "而且往往几天后才发现某台设备上的记录悄悄变了。"
+  ],
+
+  "decide": [
+    {
+      "name": "本地没有这条 → 插入",
+      "local": null,
+      "incoming": { "updated_at": 100.0 },
+      "expect": "insert"
+    },
+    {
+      "name": "对方更新 → 覆盖本地",
+      "local": { "updated_at": 100.0 },
+      "incoming": { "updated_at": 200.0 },
+      "expect": "update"
+    },
+    {
+      "name": "本地更新 → 保留本地",
+      "local": { "updated_at": 200.0 },
+      "incoming": { "updated_at": 100.0 },
+      "expect": "keep"
+    },
+    {
+      "name": "时间戳相同 → 保留本地（重复同步必须幂等，谁先写谁赢）",
+      "local": { "updated_at": 100.0 },
+      "incoming": { "updated_at": 100.0 },
+      "expect": "keep"
+    },
+    {
+      "name": "墓碑也按时间戳覆盖（否则删除会被对方复活）",
+      "local": { "updated_at": 100.0, "deleted": 0 },
+      "incoming": { "updated_at": 200.0, "deleted": 1 },
+      "expect": "update"
+    },
+    {
+      "name": "本地是更新的墓碑 → 保留本地墓碑",
+      "local": { "updated_at": 300.0, "deleted": 1 },
+      "incoming": { "updated_at": 200.0, "deleted": 0 },
+      "expect": "keep"
+    },
+    {
+      "name": "小数时间戳按大小比（epoch 秒带毫秒）",
+      "local": { "updated_at": 100.5 },
+      "incoming": { "updated_at": 100.6 },
+      "expect": "update"
+    },
+    {
+      "name": "极小差值也要认出来（不能用整数比较）",
+      "local": { "updated_at": 100.000001 },
+      "incoming": { "updated_at": 100.000002 },
+      "expect": "update"
+    }
+  ],
+
+  "pick_primary": [
+    {
+      "name": "只有一条就用它",
+      "candidates": [
+        { "id": 7, "created_at": "2026-10-04 09:00:00", "message_count": 0 }
+      ],
+      "expect": 7
+    },
+    {
+      "name": "同一天有多条 → 取消息最多的那条",
+      "candidates": [
+        { "id": 1, "created_at": "2026-10-04 09:00:00", "message_count": 2 },
+        { "id": 2, "created_at": "2026-10-04 11:00:00", "message_count": 5 }
+      ],
+      "expect": 2
+    },
+    {
+      "name": "消息数并列 → 取创建更早的",
+      "candidates": [
+        { "id": 9, "created_at": "2026-10-04 11:00:00", "message_count": 3 },
+        { "id": 4, "created_at": "2026-10-04 09:00:00", "message_count": 3 }
+      ],
+      "expect": 4
+    },
+    {
+      "name": "完全并列 → 取 id 最小的（保证两端算出同一条）",
+      "candidates": [
+        { "id": 8, "created_at": "2026-10-04 09:00:00", "message_count": 3 },
+        { "id": 3, "created_at": "2026-10-04 09:00:00", "message_count": 3 }
+      ],
+      "expect": 3
+    },
+    {
+      "name": "空列表 → 没有主会话",
+      "candidates": [],
+      "expect": null
+    }
+  ],
+
+  "day_of": [
+    { "created_at": "2026-10-04 09:00:00", "expect": "2026-10-04" },
+    { "created_at": "2026-12-31 23:59:59", "expect": "2026-12-31" },
+    { "created_at": "", "expect": "" }
+  ],
+
+  "rewind": [
+    { "watermark": 0.0, "expect": 0.0 },
+    { "watermark": 100.0, "expect": 0.0 },
+    { "watermark": 300.0, "expect": 0.0 },
+    { "watermark": 1000.0, "expect": 700.0 }
+  ],
+
+  "watermark_overlap_seconds": 300.0,
+  "plan_limit": 2000,
+  "push_chunk": 500,
+  "max_pull_rounds": 10
+}
