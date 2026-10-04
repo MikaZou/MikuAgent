@@ -299,7 +299,40 @@ class Agent(
             var clean = MULTI_SPACE.replace(raw, " ")
             clean = SPACE_BEFORE_NL.replace(clean, "\n")
             clean = MULTI_NL.replace(clean, "\n\n")
-            return Parsed(reply = clean.trim(), emotion = emotion.ifEmpty { "NORMAL" })
+            // 最后一道：假名换掉/清掉（语音读不了日语，写了会被丢掉）
+            return Parsed(reply = stripKana(clean.trim()), emotion = emotion.ifEmpty { "NORMAL" })
+        }
+
+        /**
+         * 把日语假名换掉或清掉，让气泡文字与朗读内容一致。
+         *
+         * **语音合成读不了日语。** [TtsText.normalize] 的白名单只留汉字 / 中文标点 /
+         * 全角 / ASCII，假名会被**静默丢掉** —— 于是气泡里写着「ミク」，
+         * 念出来却是漏字的，听到的和看到的对不上。
+         *
+         * 提示词里已经写明「不要出现日语假名」，实测**对干净历史完全生效**；
+         * 但历史里几百条助手消息都是「ミク」，模型会跟着自己的历史走
+         * （对照实验：空历史 0 个假名，带真实历史又冒出 2 个）。
+         * 所以再加一道确定性兜底，保证「一定不出现」。
+         *
+         * * 「ミク」这类称呼换成 Miku —— 直接删会变成漏字
+         * * 其余假名（语气词）直接删，删完收拾标点
+         * * 全部清空时返回原文：宁可气泡里有点怪，也不要空回复
+         *
+         * 与 PC 侧 `backend/agent.py::strip_kana` 同一套规则（有跨语言 golden）。
+         */
+        fun stripKana(text: String): String {
+            if (text.isEmpty()) return text
+            var out = text
+            for ((kana, replacement) in KANA_WORDS) out = out.replace(kana, replacement)
+            out = KANA_ANY.replace(out, "")
+            out = COMMA_RUN.replace(out, "，")
+            out = DUN_RUN.replace(out, "、")
+            out = MULTI_SPACE.replace(out, " ")
+            out = SPACE_BEFORE_PUNCT.replace(out, "$1")
+            out = LEAD_PUNCT.replace(out, "")
+            val cleaned = out.trim()
+            return cleaned.ifEmpty { text }
         }
 
         private val EMOTION_TAG = Regex("^\\s*\\[([A-Za-z_]+)\\]\\s*")
@@ -325,6 +358,18 @@ class Agent(
         private val MULTI_SPACE = Regex("[ \\t]{2,}")
         private val SPACE_BEFORE_NL = Regex("[ \\t]+\\n")
         private val MULTI_NL = Regex("\\n{3,}")
+
+        /** 假名替换表。顺序有意义：长的（ミクちゃん）要排在短的（ミク）前面。 */
+        private val KANA_WORDS = linkedMapOf(
+            "ミクちゃん" to "Miku",
+            "ミク" to "Miku",
+        )
+
+        private val KANA_ANY = Regex("[\u3040-\u309F\u30A0-\u30FF]")
+        private val COMMA_RUN = Regex("[，,]{2,}")
+        private val DUN_RUN = Regex("、{2,}")
+        private val SPACE_BEFORE_PUNCT = Regex("[ \\t]+([，。！？、）])")
+        private val LEAD_PUNCT = Regex("^[，、\\s]+")
 
         /** 与 PC `backend/agent.py` 的 `WRITE_MEMORY_TOOL` 逐字一致。 */
         private val WRITE_MEMORY_TOOL = JSONObject().apply {

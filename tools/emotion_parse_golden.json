@@ -28,7 +28,7 @@
   {
    "input": "HAPPY 收到收到～PC 这条路走得通だよ！☆",
    "emotion": "HAPPY",
-   "reply": "收到收到～PC 这条路走得通だよ！☆"
+   "reply": "收到收到～PC 这条路走得通！☆"
   },
   {
    "input": "SAD 主人不要难过嘛",
@@ -109,6 +109,36 @@
    "input": "NORMAL ",
    "emotion": "NORMAL",
    "reply": ""
+  },
+  {
+   "input": "ミク现在就是元气满满☆",
+   "emotion": "NORMAL",
+   "reply": "Miku现在就是元气满满☆"
+  },
+  {
+   "input": "小邹今天真的超努力ね，又是调代码又是陪ミク测试",
+   "emotion": "NORMAL",
+   "reply": "小邹今天真的超努力，又是调代码又是陪Miku测试"
+  },
+  {
+   "input": "主人主人～ミク来啦",
+   "emotion": "NORMAL",
+   "reply": "主人主人～Miku来啦"
+  },
+  {
+   "input": "[HAPPY] ミクちゃん最喜歡主人了",
+   "emotion": "HAPPY",
+   "reply": "Miku最喜歡主人了"
+  },
+  {
+   "input": "ね～だよ～",
+   "emotion": "NORMAL",
+   "reply": "～～"
+  },
+  {
+   "input": "混合：Miku 和 ミク 都出现",
+   "emotion": "NORMAL",
+   "reply": "混合：Miku 和 Miku 都出现"
   }
  ]
 }

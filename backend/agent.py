@@ -29,6 +29,45 @@ INLINE_EMOTION_TAG = re.compile(
 # 而 "HAPPYS" 这种更长单词也不会被切坏。
 BARE_EMOTION_TAG = re.compile(r"^\s*(" + "|".join(KNOWN_EMOTIONS) + r")\s+")
 
+# ---------------------------------------------------------------- 假名清理
+#
+# **语音合成读不了日语。** `tts.normalize_text` 的白名单只留汉字 / 中文标点 /
+# 全角 / ASCII，假名会被**静默丢掉** —— 于是气泡里写着「ミク」，念出来却是漏字的，
+# 用户听到的和看到的对不上。
+#
+# 提示词里已经写明「不要出现日语假名」，实测**对干净历史完全生效**；但历史里
+# 几百条助手消息都是「ミク」，模型会跟着自己的历史走（做过对照实验：空历史 0 个假名，
+# 带真实历史又冒出 2 个）。所以再加一道确定性兜底，保证「一定不出现」。
+KANA_WORDS = {
+    "ミクちゃん": "Miku",
+    "ミク": "Miku",
+}
+KANA_ANY = re.compile(r"[\u3040-\u309F\u30A0-\u30FF]")
+
+
+def strip_kana(text: str) -> str:
+    """把日语假名换掉或清掉，让气泡文字与朗读内容一致。
+
+    * 「ミク」这类称呼换成 Miku —— 直接删会变成漏字
+    * 其余假名（ね、だよ 之类的语气词）直接删
+    * 删完收拾标点，避免留下「超努力，，」这种
+
+    全部清空时返回原文：宁可气泡里有点怪，也不要空回复。
+    """
+    if not text:
+        return text
+    out = text
+    for kana, replacement in KANA_WORDS.items():
+        out = out.replace(kana, replacement)
+    out = KANA_ANY.sub("", out)
+    out = re.sub(r"[，,]{2,}", "，", out)
+    out = re.sub(r"、{2,}", "、", out)
+    out = re.sub(r"[ \t]{2,}", " ", out)
+    out = re.sub(r"[ \t]+([，。！？、）])", r"\1", out)
+    out = re.sub(r"^[，、\s]+", "", out)
+    cleaned = out.strip()
+    return cleaned if cleaned else text
+
 WRITE_MEMORY_TOOL = {
     "type": "function",
     "function": {
@@ -142,7 +181,8 @@ def parse_emotion(text: str) -> tuple[str, str]:
     clean = re.sub(r"[ \t]{2,}", " ", raw)
     clean = re.sub(r"[ \t]+\n", "\n", clean)
     clean = re.sub(r"\n{3,}", "\n\n", clean)
-    return (emotion or "NORMAL"), clean.strip()
+    # 最后一道：假名换掉/清掉（语音读不了日语，写了会被丢掉）
+    return (emotion or "NORMAL"), strip_kana(clean.strip())
 
 
 class MikuAgent:
