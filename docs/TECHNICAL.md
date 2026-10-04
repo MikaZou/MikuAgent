@@ -2466,6 +2466,7 @@ PC 侧**不存游标**：手机是发起方（它才知道自己什么时候能�
 | **模型清单只在 WS 下发** | 面板说「还没收到模型清单」，明明缓存着两套模型 | 清单原本只在 `ready` 里给 | 清单本来就是 HTTP 资源：调 `GET /model/list`，收到就落地，离线时用本地缓存重算 `present` |
 | **状态栏伪造「已连接」** | `connected=false` 但状态栏写「已连接」 | `runSync` 里写了 `onStatus(lastStatus?.first ?: "connected", …)`，独立模式下 `lastStatus` 是空的 | 删掉那行（面板打开时自己会重新读 `deviceState()`） |
 | **首次使用浮层把界面彻底挡住** | 打开 App 就停在「连接你的 PC」，点哪儿都没反应、模型在背后若隐若现 | 那个浮层**默认可见**，只在收到 `connected` 状态时才隐藏 —— 而独立模式根本不连 WebSocket，于是它永远不消失 | 浮层默认 `hide`，由 `syncSetupVisibility()` 判定：只在**既没配 PC 地址、也没填 Key** 时出现，并加一个「以后再说」的出口（记进 localStorage）。教训：**任何「默认可见、靠某个事件隐藏」的浮层都是潜在死锁** —— 事件不来，用户就被锁在外面 |
+| **气泡一变模型就缩成一小团** | 聊天气泡出现之后，模型从满屏缩到 175px（可用区 512px） | 两层：① rtLocal（美术本地范围）缓存后从不失效，而它其实依赖环境；② 测量循环把模型摆在 (0,0)，美术稍微超出画布左上角就被 	ouchesEdge 误判成贴边 → 退回顶点法（偏大） | 测量时贴边就挪到画布正中再量（位置参与坐标换算，别忘了减）；缓存用画布尺寸做键；**算完再量一次自校验**，填充率偏离 1 就丢弃缓存重测 —— 把「测量偶尔出错」从静默的错变成能自愈 |
 | `parseEmotion` 的返回值顺序被静默写反 | 气泡显示的是 `HAPPY` 当正文，TTS 念的是「HAPPY」 | 它返回 `(情感, 正文)`，调用方按 `(正文, 情感)` 解构 —— 两个 String 的 `Pair`，编译器一句话都不会说 | **别再用 `Pair<String, String>`**：改具名的 `Agent.Parsed(reply, emotion)`，物理上写不反 |
 | `MasterKey` 在 `security-crypto:1.0.0` 里不存在 | 编译期 `Unresolved reference` | `MasterKey.Builder` 是 1.1.0-alpha 才加的 | 用 1.0.0 的字符串别名重载（行为一样，不值得为它引 alpha） |
 | Android 没有 `executescript` / `query(sql,args)` | 编译期报错 | 那是 Python sqlite3 和别的 API | 逐条 `execSQL`；读原始 SQL 用 `rawQuery` |

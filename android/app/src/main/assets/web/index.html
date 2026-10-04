@@ -523,7 +523,8 @@ async function loadModel() {
     core = model.internalModel.coreModel;
 
     layout();
-    window.addEventListener("resize", layout);
+    // 窗口尺寸一变，缓存的测量值就作废（软键盘、系统栏、旋转都会触发）
+    window.addEventListener("resize", () => { artLocal = null; layout(); });
     setStatus("已就绪", "on");
 
     // 水印：默认隐藏（用户明确要求去掉）。模型说明第 4 条是「默认打开、
@@ -590,9 +591,22 @@ function touchesEdge(box, w, h, slack) {
 
 /**
  * 美术在**模型本地坐标**里的范围，只量一次。
- * 本地范围是模型固有属性（与窗口大小无关），所以能安全缓存。
+ *
+ * ⚠️ 但它**不是**与窗口大小无关的：「本地坐标 → 屏幕像素」这一步还乘了一个
+ * 由画布尺寸决定的投影。所以画布一改（软键盘弹出/收起、系统栏隐藏、旋转），
+ * 之前量的值就不再成立 —— 必须靠 [artLocalKey] 记住「这是在哪块画布上量的」。
+ *
+ * 踩过的坑：只做缓存、不做失效，用户打字弹出键盘之后模型缩成一小团
+ * （实测渲染 175px，而按缓存的 artLocal 应该 502px）。
  */
 let artLocal = null;
+
+/** [artLocal] 是在哪块画布上量出来的。画布一变就作废。 */
+let artLocalKey = "";
+
+function canvasKey() {
+  return app.renderer.width + "x" + app.renderer.height + "@" + app.renderer.resolution;
+}
 
 /** 直接读 WebGL 帧缓冲的 alpha，返回美术包围盒（CSS 像素，原点左上）。 */
 function measureRenderedBox() {
@@ -668,13 +682,20 @@ function applyLayout(s, artCx, artCy, avail) {
   );
 }
 
-function layout() {
+function layout(depth) {
   if (!model || !app) return;
+  depth = depth || 0;
   const avail = availRect();
   const availW = Math.max(1, avail.x1 - avail.x0);
   const availH = Math.max(1, avail.y1 - avail.y0);
   const w = app.renderer.width / app.renderer.resolution;
   const h = app.renderer.height / app.renderer.resolution;
+
+  // 画布尺寸变了 → 之前量的「本地美术范围」不再成立（见 artLocal 的说明）
+  if (artLocal && artLocalKey !== canvasKey()) {
+    console.log("画布尺寸变了（" + artLocalKey + " → " + canvasKey() + "），重新测量美术范围");
+    artLocal = null;
+  }
 
   // 动画会让包围盒抖动，量之前先停掉动作；量完 ticker 会自己把待机接回去
   let mm = model.internalModel && model.internalModel.motionManager;
@@ -689,23 +710,39 @@ function layout() {
     ({ w: artW, h: artH, cx: artCx, cy: artCy } = artLocal);
     method = "cached";
   } else {
-    // 1) 缩到很小、摆到原点，量出美术在**本地坐标**里的真实范围
-    let k = 0.05, box = null;
+    // 1) 缩到很小、量出美术在**本地坐标**里的范围
+    //
+    //    两个坑都在这一小段里：
+    //    * 摆在 (0,0) 时，美术只要稍微超出画布左上角就会被 touchesEdge 误判成
+    //      「贴边」，k 一路缩到极小、最后退回**顶点法**（几何范围，经典模型上会偏大）。
+    //      所以贴边时按刚量到的中心把模型**挪到画布正中**再量一次。
+    //    * 位置一旦不是 (0,0)，本地坐标就不再等于「屏幕坐标 / k」——
+    //      必须减掉位置再除。忘了这一步会把美术中心算错、模型被摆出画布
+    //      （实测渲染框从 @(0,0) 开始，就是被裁了）。
+    let k = 0.05, box = null, px = 0, py = 0;
     for (let i = 0; i < 6; i++) {
       model.scale.set(k);
-      model.position.set(0, 0);
-      box = measureRenderedBox();
-      if (box && !touchesEdge(box, w, h, 1.5)) break;
+      model.position.set(px, py);
+      let b = measureRenderedBox();
+      if (b && touchesEdge(b, w, h, 1.5)) {
+        // 贴边：先按量到的中心挪到画布正中，再量一次
+        px += w / 2 - (b.minX + b.maxX) / 2;
+        py += h / 2 - (b.minY + b.maxY) / 2;
+        model.position.set(px, py);
+        b = measureRenderedBox();
+      }
+      if (b && !touchesEdge(b, w, h, 1.5)) { box = b; break; }
       box = null;
       k *= 0.5;
-      console.log("首次测量贴边，缩到 k=" + k);
+      console.log("首次测量仍贴边，缩到 k=" + k);
     }
 
     if (box) {
+      // 本地坐标 = (屏幕坐标 - 位置) / k
       artW = (box.maxX - box.minX) / k;
       artH = (box.maxY - box.minY) / k;
-      artCx = (box.minX + box.maxX) / 2 / k;
-      artCy = (box.minY + box.maxY) / 2 / k;
+      artCx = ((box.minX + box.maxX) / 2 - px) / k;
+      artCy = ((box.minY + box.maxY) / 2 - py) / k;
     } else {
       const fb = measureArtBoundsByVertices();
       if (!fb) { console.warn("取景失败：渲染测量与顶点测量都没拿到包围盒"); return; }
@@ -716,6 +753,7 @@ function layout() {
       artCy = (fb.minY + fb.maxY) / 2;
     }
     artLocal = { w: artW, h: artH, cx: artCx, cy: artCy };
+    artLocalKey = canvasKey();
   }
 
   // 2) 按可用区算目标缩放，并让美术中心落在可用区中心
@@ -738,6 +776,37 @@ function layout() {
   }
 
   const last = measureRenderedBox();
+
+  // 4) 自校验：闭环校正只在 ±10% 内动手，所以「量错了一次」会被原样留下。
+  //
+  //    真机上踩到过：页面刚加载时那次测量拿到了**瞬时错误**的结果
+  //    （模型的内部投影还没建立，同一 scale 下渲染出来的比之后大 2.87 倍），
+  //    被缓存之后一直用；气泡一出现触发重排，模型就被缩成一小团
+  //    （实测渲染 175px，而可用区是 512px）。用户看到的就是「对话框一变、模型也变了」。
+  //
+  //    判据用「**美术应当填满可用区**」而不是「长宽比对不对」：
+  //    按 s = min(availW/artW, availH/artH) 算出来的结果，必然有一边贴边
+  //    （另一边受美术自身的宽高比限制，本来就填不满）。所以取两边填充率的
+  //    **最大值**，它应该 ≈ 1。用 min() 会被「高度碰巧接近」掩盖掉宽度差得离谱的情况。
+  //
+  //    连 last 为空也要重测：读帧缓冲偶尔会读到全透明的一帧（实测碰到过一次），
+  //    那时若直接放过，错的布局就留在屏幕上了。
+  if (depth === 0) {
+    const fill = last
+      ? Math.max(
+          (last.maxX - last.minX) / availW,
+          (last.maxY - last.minY) / availH,
+        )
+      : 0;
+    if (fill < 0.95 || fill > 1.06) {
+      console.warn("取景没填满可用区(fill=" + fill.toFixed(2) + ")，丢弃缓存重测：" +
+        "渲染 " + (last ? Math.round(last.maxX - last.minX) + "x" + Math.round(last.maxY - last.minY) : "空帧") +
+        "，可用 " + Math.round(availW) + "x" + Math.round(availH));
+      artLocal = null;
+      return layout(1);   // 只递归一层，避免测量一直失败时死循环
+    }
+  }
+
   console.log("FIT(" + method + ") s=" + s.toFixed(4) +
     " artLocal=" + Math.round(artW) + "x" + Math.round(artH) +
     " avail=" + Math.round(availW) + "x" + Math.round(availH) +
