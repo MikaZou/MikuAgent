@@ -82,6 +82,10 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
     /** 当前对话通道（api / pc）。onChat 每次都现挑，切换模式不用重启。 */
     private var brain: Brain? = null
 
+    /** 手机端自己的语音合成 / 识别（只有独立模式用得到）。 */
+    private lateinit var tts: com.mikuagent.pet.brain.Tts
+    private val stt = com.mikuagent.pet.brain.Stt()
+
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
     @Volatile
@@ -157,6 +161,7 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
         activeModelId = prefs.getString(KEY_MODEL, null) ?: AssetServer.DEFAULT_MODEL
         assets.activeModelId = activeModelId
         memory = MemoryStore.get(this)
+        tts = com.mikuagent.pet.brain.Tts(this)
         capture = AudioCapture()
         // 口型包络直接喂给页面；30Hz 的频率 evaluateJavascript 扛得住
         player = AudioPlayer { level -> if (pageReady) bridge.onMouth(level) }
@@ -425,10 +430,23 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
         }
     }
 
-    /** 手机端自己合成并播放。Phase 3 接上 TTS 之前是个空实现。 */
+    /** 手机端自己合成并播放（独立模式）。走 PC 时语音由 PC 下发，这里不会被调用。 */
     private fun speakLocally(text: String, emotion: String) {
-        val local = brain as? LocalBrain ?: return
-        if (!local.deliversSpeech) Log.d(TAG, "本地语音待接入：${text.take(12)}")
+        if (text.isBlank()) return
+        scope.launch {
+            val wav = withContext(Dispatchers.IO) {
+                tts.synthesize(text, emotion, BrainConfig.load(this@MainActivity))
+            }
+            if (wav == null) {
+                Log.d(TAG, "这一句没有语音：${text.take(12)}")
+                bridge.onSpeechEnd()   // 让页面把「说话中…」收回去
+                return@launch
+            }
+            val seconds = player.play(Base64.encodeToString(wav, Base64.NO_WRAP)) {
+                runOnUiThread { bridge.onSpeechEnd() }
+            }
+            bridge.onSpeech(seconds)
+        }
     }
 
     override fun onConnect(host: String, port: Int) {
@@ -461,6 +479,23 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
         put("secretsEncrypted", SecretStore.isEncrypted(this@MainActivity))
         put("memory", JSONObject().apply {
             memory.counts().forEach { (k, v) -> put(k, v) }
+        })
+        val cfg = BrainConfig.load(this@MainActivity)
+        put("tts", JSONObject().apply {
+            put("status", tts.status(cfg))
+            put("cacheBytes", tts.cacheSizeBytes())
+            tts.last?.let { s ->
+                put("last", JSONObject().apply {
+                    put("textChars", s.textChars)
+                    put("cleanChars", s.cleanChars)
+                    put("sentChars", s.sentChars)
+                    put("format", s.format)
+                    put("bytes", s.bytes)
+                    put("billedChars", s.billedChars)
+                    put("audioMs", s.audioMs)
+                    put("fromCache", s.fromCache)
+                })
+            }
         })
     }.toString()
 
@@ -528,24 +563,79 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
             return
         }
         val (b64, seconds) = result
-        Log.i(TAG, "上传语音 ${"%.2f".format(seconds)}s")
+        Log.i(TAG, "收下语音 ${"%.2f".format(seconds)}s")
+
+        val current = pickBrain()
+        brain = current
 
         // 和 PC 端「视频对话」同一套做法：**不是**持续推流，而是在说话结束时
         // 自动配一张画面给 Miku 看。手机上没有摄像头预览，所以只在开头拍一帧；
         // 这样既能看到主人，又不会一直开着摄像头（指示灯常亮是隐私问题）
         // 也不费流量。
-        if (videoMode) {
-            photoTaker.take { photo, err ->
+        // PhotoTaker 给的是 base64 字符串（与 PC 的 sendAudio 同一个形状）
+        val withPhoto: (String?) -> Unit = { photo ->
+            if (current is LocalBrain) {
+                transcribeThenChat(b64, photo)
+            } else {
                 if (photo != null) {
                     Log.i(TAG, "语音附带画面 ${photo.length / 1024}KB")
                     remote.sendAudio(b64, photo)
                 } else {
-                    Log.w(TAG, "附带画面失败，只发语音：$err")
                     remote.sendAudio(b64)
                 }
             }
+        }
+
+        if (videoMode) {
+            photoTaker.take { photo, err ->
+                if (photo == null) Log.w(TAG, "附带画面失败，只发语音：$err")
+                withPhoto(photo)
+            }
         } else {
-            remote.sendAudio(b64)
+            withPhoto(null)
+        }
+    }
+
+    /**
+     * 独立模式下：**手机自己**把录音转成文字，然后当成一次普通对话。
+     *
+     * 与 PC 路径的差别只有「谁来转写」—— 转完之后走的是同一套 chat，
+     * 页面看到的 `transcript` / `reply` 事件也一模一样。
+     */
+    private fun transcribeThenChat(wavBase64: String, photoBase64: String?) {
+        scope.launch {
+            val wav = runCatching { Base64.decode(wavBase64, Base64.DEFAULT) }.getOrNull()
+            if (wav == null) {
+                bridge.onError("录音解码失败")
+                return@launch
+            }
+            val text = withContext(Dispatchers.IO) {
+                stt.transcribe(wav, BrainConfig.load(this@MainActivity))
+            }
+            if (text == null) {
+                bridge.onError(stt.lastError.ifBlank { "识别失败" })
+                return@launch
+            }
+            if (text.isBlank()) {
+                // 转写为空：与 PC 一样回一条空 transcript，页面会提示「没听清」
+                bridge.onTranscript("")
+                return@launch
+            }
+            bridge.onTranscript(text)
+            val local = brain as? LocalBrain ?: return@launch
+            // 页面/相机的图片是 base64，LocalBrain 要字节
+            val image = photoBase64?.let {
+                runCatching { Base64.decode(it, Base64.DEFAULT) }.getOrNull()
+            }
+            local.send(sessionId, text, image) { reply ->
+                when (reply) {
+                    is Reply.Ok -> {
+                        sessionId = reply.sessionId
+                        deliverReply(reply.text, reply.emotion)
+                    }
+                    is Reply.Err -> runOnUiThread { bridge.onError(reply.message) }
+                }
+            }
         }
     }
 

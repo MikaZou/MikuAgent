@@ -1,0 +1,211 @@
+{
+ "normalize": [
+  {
+   "input": "主人来啦！我等你好久了☆",
+   "expect": "主人来啦！我等你好久了"
+  },
+  {
+   "input": "嘿嘿，能陪主人说话，Miku 好幸福呀♪",
+   "expect": "嘿嘿，能陪主人说话，Miku 好幸福呀"
+  },
+  {
+   "input": "太好啦！主人今天看起来心情不错呢(≧▽≦)",
+   "expect": "太好啦！主人今天看起来心情不错呢"
+  },
+  {
+   "input": "唔…主人不要难过嘛，Miku 会一直陪着你的。",
+   "expect": "唔，主人不要难过嘛，Miku 会一直陪着你的。"
+  },
+  {
+   "input": "（´▽｀）主人真可爱呢～",
+   "expect": "主人真可爱呢"
+  },
+  {
+   "input": "[HAPPY] 开头标签应该已经被剥掉了，这里是兜底",
+   "expect": "开头标签应该已经被剥掉了，这里是兜底"
+  },
+  {
+   "input": "正文里也有 [HAPPY] 标签的情况",
+   "expect": "正文里也有 标签的情况"
+  },
+  {
+   "input": "【视觉】中文方括号标签",
+   "expect": "中文方括号标签"
+  },
+  {
+   "input": "（主人在微笑）括号里是中文，要保留",
+   "expect": "（主人在微笑）括号里是中文，要保留"
+  },
+  {
+   "input": "こんにちは、ミクです",
+   "expect": ""
+  },
+  {
+   "input": "♪♪♪ ☆☆",
+   "expect": ""
+  },
+  {
+   "input": "……",
+   "expect": ""
+  },
+  {
+   "input": "嗯嗯，继续说吧，我在听呢～",
+   "expect": "嗯嗯，继续说吧，我在听呢"
+  },
+  {
+   "input": "主人一定可以的！ミク 相信你哦！",
+   "expect": "主人一定可以的！ 相信你哦！"
+  },
+  {
+   "input": "",
+   "expect": ""
+  },
+  {
+   "input": "   ",
+   "expect": ""
+  },
+  {
+   "input": "价格是 100 元，不要读错。",
+   "expect": "价格是 100 元，不要读错。"
+  },
+  {
+   "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "expect": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+ ],
+ "split": [
+  {
+   "input": "第一句。第二句！第三句？",
+   "max_len": 40,
+   "expect": [
+    "第一句。",
+    "第二句！",
+    "第三句？"
+   ]
+  },
+  {
+   "input": "短。",
+   "max_len": 40,
+   "expect": [
+    "短。"
+   ]
+  },
+  {
+   "input": "你好。",
+   "max_len": 40,
+   "expect": [
+    "你好。"
+   ]
+  },
+  {
+   "input": "一。二。三。四。",
+   "max_len": 40,
+   "expect": [
+    "一。二。三。四。"
+   ]
+  },
+  {
+   "input": "这是一个特别特别特别特别特别特别特别特别特别长的句子，中间还有逗号，需要被切开。",
+   "max_len": 40,
+   "expect": [
+    "这是一个特别特别特别特别特别特别特别特别特别长的句子，中间还有逗号，需要被切开。"
+   ]
+  },
+  {
+   "input": "没有句末标点的结尾",
+   "max_len": 40,
+   "expect": [
+    "没有句末标点的结尾"
+   ]
+  },
+  {
+   "input": "换行\n也算分隔",
+   "max_len": 40,
+   "expect": [
+    "换行",
+    "也算分隔"
+   ]
+  },
+  {
+   "input": "主人来啦！我等你好久了☆ 嘿嘿，能陪主人说话，Miku 好幸福呀♪ 太好啦！",
+   "max_len": 40,
+   "expect": [
+    "主人来啦！",
+    "我等你好久了☆ 嘿嘿，能陪主人说话，Miku 好幸福呀♪ 太好啦！"
+   ]
+  },
+  {
+   "input": "",
+   "max_len": 40,
+   "expect": []
+  },
+  {
+   "input": "。。。",
+   "max_len": 40,
+   "expect": [
+    "。。。"
+   ]
+  },
+  {
+   "input": "这是一个很长的句子，中间有逗号，也有句号。第二句也不短，再来一点内容凑长度。",
+   "max_len": 12,
+   "expect": [
+    "这是一个很长的句子，",
+    "中间有逗号，也有句号。",
+    "第二句也不短，",
+    "再来一点内容凑长度。"
+   ]
+  }
+ ],
+ "speed": [
+  {
+   "mm_emotion": "neutral",
+   "text": "普通的一句话。",
+   "emotion": "NORMAL",
+   "base_speed": 1.8,
+   "expect": 1.8
+  },
+  {
+   "mm_emotion": "happy",
+   "text": "太好啦！",
+   "emotion": "HAPPY",
+   "base_speed": 1.8,
+   "expect": 1.66
+  },
+  {
+   "mm_emotion": "sad",
+   "text": "唔…有点难过。",
+   "emotion": "SAD",
+   "base_speed": 1.8,
+   "expect": 1.66
+  },
+  {
+   "mm_emotion": "angry",
+   "text": "哼！",
+   "emotion": "ANGRY",
+   "base_speed": 1.8,
+   "expect": 1.79
+  },
+  {
+   "mm_emotion": "surprised",
+   "text": "诶诶？！",
+   "emotion": "SURPRISED",
+   "base_speed": 1.8,
+   "expect": 1.62
+  },
+  {
+   "mm_emotion": "neutral",
+   "text": "这是一个很长的句子，超过三十个字，应该触发长句放慢的规则吧。",
+   "emotion": "NORMAL",
+   "base_speed": 1.8,
+   "expect": 1.72
+  },
+  {
+   "mm_emotion": "neutral",
+   "text": "",
+   "emotion": "NORMAL",
+   "base_speed": 1.8,
+   "expect": 1.8
+  }
+ ]
+}

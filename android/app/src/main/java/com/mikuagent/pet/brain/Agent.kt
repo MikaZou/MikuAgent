@@ -34,6 +34,16 @@ class Agent(
         val hadImage: Boolean,
     )
 
+    /**
+     * 「正文 + 情感标签」。
+     *
+     * **不用 `Pair<String, String>`**：两个 String 的 Pair 一旦在解构处写反，
+     * 编译器一句话都不会说，而表现是「把 'HAPPY' 当成正文送进 TTS」——
+     * 真的踩到了（TTS 账单上明明白白写着「计费 5 字」）。
+     * 具名类型让 `x.reply` / `x.emotion` 无法写反。
+     */
+    data class Parsed(val reply: String, val emotion: String)
+
     val live: Boolean get() = config.hasDeepseekKey
 
     fun chat(
@@ -56,7 +66,7 @@ class Agent(
             platform = platform,
         )
 
-        val (reply, emotion) = if (!live) {
+        val parsed = if (!live) {
             mockReply(userMessage)
         } else {
             try {
@@ -66,6 +76,8 @@ class Agent(
                 mockReply(userMessage, error = true)
             }
         }
+        val reply = parsed.reply
+        val emotion = parsed.emotion
 
         // 与 PC 一致：图片只作用于当前这一轮，历史里只留文本占位符
         // （base64 又大又涉及隐私，不入库）
@@ -92,7 +104,7 @@ class Agent(
         history: List<com.mikuagent.pet.memory.MessageRow>,
         userMessage: String,
         imageJpeg: ByteArray?,
-    ): Pair<String, String> {
+    ): Parsed {
         val messages = JSONArray()
         messages.put(JSONObject().put("role", "system").put("content", systemPrompt))
         for (m in history) {
@@ -203,13 +215,13 @@ class Agent(
     // ---------------------------------------------------- 情感标签与兜底
 
     /**
-     * 从回复里解析情感标签，返回 (情感, 去掉标签的正文)。
+     * 从回复里解析情感标签，返回「正文 + 情感」。
      *
      * 标签可能出现两次：开头（约定的格式）和正文中间（模型自由发挥）。
      * 两处都必须清掉 —— 只处理开头的话，中间那个会原样显示在气泡里，
      * 还会被 TTS 念出来（「左括号 HAPPY 右括号」）。PC 侧踩过这个坑。
      */
-    fun parseEmotion(text: String): Pair<String, String> {
+    fun parseEmotion(text: String): Parsed {
         var raw = text
         var emotion = ""
 
@@ -229,29 +241,29 @@ class Agent(
         var clean = MULTI_SPACE.replace(raw, " ")
         clean = SPACE_BEFORE_NL.replace(clean, "\n")
         clean = MULTI_NL.replace(clean, "\n\n")
-        return (emotion.ifEmpty { "NORMAL" }) to clean.trim()
+        return Parsed(reply = clean.trim(), emotion = emotion.ifEmpty { "NORMAL" })
     }
 
     /** 离线演示回复：没配 Key 或调用失败时的兜底。文案与 PC **逐字一致**。 */
-    fun mockReply(userMessage: String, error: Boolean = false): Pair<String, String> {
-        if (error) return ERROR_REPLIES.random() to "SAD"
+    fun mockReply(userMessage: String, error: Boolean = false): Parsed {
+        if (error) return Parsed(ERROR_REPLIES.random(), "SAD")
 
         val text = userMessage.trim().lowercase()
         if (listOf("你好", "hello", "hi", "嗨", "在吗").any { it in text }) {
-            return MOCK_REPLIES.getValue("HAPPY").random() to "HAPPY"
+            return Parsed(MOCK_REPLIES.getValue("HAPPY").random(), "HAPPY")
         }
         if (listOf("喜欢", "爱你", "最喜欢").any { it in text }) {
-            return "嘿嘿，Miku 也最喜欢主人了☆" to "HAPPY"
+            return Parsed("嘿嘿，Miku 也最喜欢主人了☆", "HAPPY")
         }
         if (listOf("难过", "伤心", "哭", "累").any { it in text }) {
-            return MOCK_REPLIES.getValue("EMPATHY").random() to "EMPATHY"
+            return Parsed(MOCK_REPLIES.getValue("EMPATHY").random(), "EMPATHY")
         }
         if ("唱歌" in text || "歌" in text) {
-            return "想听 Miku 唱歌吗？《世界第一的公主殿下》怎么样♪" to "MOTIVATED"
+            return Parsed("想听 Miku 唱歌吗？《世界第一的公主殿下》怎么样♪", "MOTIVATED")
         }
 
         val emotion = listOf("HAPPY", "HAPPY", "NORMAL", "NORMAL", "MOTIVATED", "EMPATHY").random()
-        return MOCK_REPLIES.getValue(emotion).random() to emotion
+        return Parsed(MOCK_REPLIES.getValue(emotion).random(), emotion)
     }
 
     /** 把异常翻译成用户能看懂的一句话（页面会直接显示它）。 */
