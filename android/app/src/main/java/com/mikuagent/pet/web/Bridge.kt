@@ -62,6 +62,8 @@ class Bridge(
         fun onApiConfig(): String
         /** 切换对话通道 api / pc / auto。 */
         fun onSetBrainMode(mode: String)
+        /** 立刻跑一次记忆同步（设置面板的「立即同步」）。 */
+        fun onSyncNow(): String
         /** 页面脚本**初始化完成**（与「模型渲染成功」是两件事） */
         fun onPageAlive()
         /** 页面自己也需要知道连接状态时用 */
@@ -133,6 +135,9 @@ class Bridge(
 
     @JavascriptInterface
     fun setBrainMode(mode: String) = actions.onSetBrainMode(mode.trim())
+
+    @JavascriptInterface
+    fun syncNow(): String = actions.onSyncNow()
 
     @JavascriptInterface
     fun ready(info: String) {

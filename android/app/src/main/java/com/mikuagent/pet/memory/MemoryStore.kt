@@ -310,11 +310,28 @@ class MemoryStore private constructor(context: Context) :
      * **单位是「天」**：同一批变动消息按日期归组，连这一天的会话信息一起打包。
      * 这样接收端不需要知道发送端的会话 id —— 它按日期找自己那一条就行
      * （会话本来就「一天一条」）。
+     *
+     * @param originOnly 只取这个来源的行。推送时必须传 `"phone"`：
+     *   从 PC 同步过来的行 `origin` 是 `"pc"`，再把它们推回去纯属回声 ——
+     *   尤其当 PC 的时钟比手机快时，那些行的 `updated_at` 永远大于手机的
+     *   pushWatermark，会**每次同步都重发一遍**。
      */
-    fun changesSince(since: Double, limit: Int = MergeRules.PLAN_LIMIT): SyncBundle {
+    fun changesSince(
+        since: Double,
+        limit: Int = MergeRules.PLAN_LIMIT,
+        originOnly: String? = null,
+    ): SyncBundle {
+        val originClause = if (originOnly != null) " AND origin = ?" else ""
+
         val changed = readable.rawQuery(
-            "SELECT * FROM messages WHERE updated_at > ? ORDER BY updated_at LIMIT ?",
-            arrayOf(since.toString(), limit.toString()),
+            "SELECT * FROM messages WHERE updated_at > ?$originClause " +
+                "ORDER BY updated_at LIMIT ?",
+            // 注意参数顺序：originClause 插在 updated_at 与 LIMIT 之间
+            if (originOnly != null) {
+                arrayOf(since.toString(), originOnly, limit.toString())
+            } else {
+                arrayOf(since.toString(), limit.toString())
+            },
         ).use { it.mapRows(::readMessage) }
 
         val days = changed.groupBy { MergeRules.dayOf(it.createdAt) }
@@ -331,8 +348,13 @@ class MemoryStore private constructor(context: Context) :
             }
 
         val memories = readable.rawQuery(
-            "SELECT * FROM memory_items WHERE updated_at > ? ORDER BY updated_at LIMIT ?",
-            arrayOf(since.toString(), limit.toString()),
+            "SELECT * FROM memory_items WHERE updated_at > ?$originClause " +
+                "ORDER BY updated_at LIMIT ?",
+            if (originOnly != null) {
+                arrayOf(since.toString(), originOnly, limit.toString())
+            } else {
+                arrayOf(since.toString(), limit.toString())
+            },
         ).use { it.mapRows(::readMemory) }
 
         val meta = readable.rawQuery(

@@ -48,6 +48,7 @@ from aiohttp import WSMsgType, web
 
 import config
 import models_catalog
+import sync_rules
 
 WEB_DIR = config.BASE_DIR / "web"
 
@@ -149,6 +150,10 @@ class RemoteServer:
         app.router.add_get("/model/manifest", self._handle_manifest)
         app.router.add_get("/model/{model}/manifest", self._handle_manifest)
         app.router.add_get("/model/{tail:.*}", self._handle_model_file)
+        # 双端记忆同步（手机发起；PC 只负责给变动、收变动，不需要游标状态）
+        app.router.add_get("/sync/state", self._handle_sync_state)
+        app.router.add_get("/sync/changes", self._handle_sync_changes)
+        app.router.add_post("/sync/changes", self._handle_sync_apply)
         # 手机端要用的静态资源
         app.router.add_static("/static/", WEB_DIR, show_index=False)
         return app
@@ -376,6 +381,58 @@ class RemoteServer:
                 await ws.send_json({"type": "error", "message": str(exc)})
             except Exception:  # noqa: BLE001
                 pass
+
+    # ------------------------------------------------------------ 记忆同步
+    #
+    # 手机是**发起方**：它知道自己什么时候能连上（网络恢复、刚启动、聊完一轮）。
+    # 所以 PC 侧没有游标状态，只有「给变动」和「收变动」两个动作 ——
+    # 少一份状态就少一类「两端游标不一致」的故障。
+
+    async def _handle_sync_state(self, request: web.Request) -> web.Response:
+        """探活用。手机先打这里，通了才谈同步。"""
+        return web.json_response({
+            "now": time.time(),
+            "counts": await asyncio.to_thread(self.memory.counts),
+        })
+
+    async def _handle_sync_changes(self, request: web.Request) -> web.Response:
+        """把 `updated_at > since` 的变动按天打包给手机。
+
+        返回的 `now` 是**服务端时钟**：手机要拿它当下次拉取的游标，
+        而不是用自己的钟 —— 手机慢几秒就会漏掉刚写的行。
+        """
+        try:
+            since = float(request.query.get("since", "0"))
+        except ValueError:
+            return web.json_response({"error": "since 不是数字"}, status=400)
+        try:
+            limit = int(request.query.get("limit", str(sync_rules.plan_limit())))
+        except ValueError:
+            limit = sync_rules.plan_limit()
+
+        bundle = await asyncio.to_thread(self.memory.changes_since, since, limit)
+        count = sum(len(d["messages"]) for d in bundle["days"])
+        payload = {"now": time.time(), "has_more": count >= limit, **bundle}
+        _log(f"同步：自 {since:.0f} 起有 {len(bundle['days'])} 天 / {count} 条消息"
+             f" / {len(bundle['memories'])} 条记忆")
+        return web.json_response(payload)
+
+    async def _handle_sync_apply(self, request: web.Request) -> web.Response:
+        """收下手机送来的变动并合并。"""
+        try:
+            body = await request.json()
+        except Exception as exc:  # noqa: BLE001
+            return web.json_response({"error": f"不是合法 JSON：{exc}"}, status=400)
+        if not isinstance(body, dict):
+            return web.json_response({"error": "body 必须是对象"}, status=400)
+
+        result = await asyncio.to_thread(self.memory.apply_bundle, body)
+        _log(
+            f"同步：手机送来 {len(body.get('days') or [])} 天 / "
+            f"{sum(len(d.get('messages') or []) for d in (body.get('days') or []))} 条消息"
+            f" → 新增 {result['inserted']} / 更新 {result['updated']} / 保留 {result['kept']}"
+        )
+        return web.json_response({"applied": result, "now": time.time()})
 
     async def _do_chat(self, ws, req: dict, peer: str) -> None:
         text = (req.get("text") or "").strip()

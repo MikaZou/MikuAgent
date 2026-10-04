@@ -41,6 +41,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -85,6 +86,16 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
     /** 手机端自己的语音合成 / 识别（只有独立模式用得到）。 */
     private lateinit var tts: com.mikuagent.pet.brain.Tts
     private val stt = com.mikuagent.pet.brain.Stt()
+
+    /** 双端记忆同步（Phase 4）。名字避开已有的 `sync`（那是 ModelSync）。 */
+    private lateinit var memorySync: com.mikuagent.pet.memory.SyncClient
+
+    /** 同步是后台动作：同一时刻只跑一次，避免「启动 + 网络恢复」同时触发。 */
+    private val memorySyncing = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** 最近一次同步的结果，给设置面板显示。 */
+    @Volatile
+    private var lastSyncText: String = ""
 
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
@@ -161,6 +172,7 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
         activeModelId = prefs.getString(KEY_MODEL, null) ?: AssetServer.DEFAULT_MODEL
         assets.activeModelId = activeModelId
         memory = MemoryStore.get(this)
+        memorySync = com.mikuagent.pet.memory.SyncClient(memory)
         tts = com.mikuagent.pet.brain.Tts(this)
         capture = AudioCapture()
         // 口型包络直接喂给页面；30Hz 的频率 evaluateJavascript 扛得住
@@ -224,6 +236,13 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
         } else {
             Log.i(TAG, "尚未配置 PC 地址，等用户在界面上填")
         }
+
+        // 启动后跑一次记忆同步。延后几秒：模型同步与首屏渲染更该抢带宽，
+        // 而且这时页面也才刚起来。
+        scope.launch {
+            delay(3_000)
+            runSync()
+        }
     }
 
     /**
@@ -269,7 +288,7 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
      *   会在 onPageAlive 里重新请求加载）。
      */
     private fun syncModel(host: String, port: Int, reloadAfter: Boolean = false) {
-        if (!syncing.compareAndSet(false, true)) {
+        if (!memorySyncing.compareAndSet(false, true)) {
             Log.i(TAG, "已有同步在进行，跳过本次触发")
             return
         }
@@ -301,7 +320,7 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
                     }
                 }
             } finally {
-                syncing.set(false)
+                memorySyncing.set(false)
             }
         }
     }
@@ -393,9 +412,46 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
                 is Reply.Ok -> {
                     sessionId = reply.sessionId
                     deliverReply(reply.text, reply.emotion)
+                    // 刚写进本机记忆，顺手推给对方（不拉：自己不需要再来一遍）
+                    runSync(pushOnly = true)
                 }
                 is Reply.Err -> runOnUiThread { bridge.onError(reply.message) }
             }
+        }
+    }
+
+    /**
+     * 跑一次同步。`pushOnly = true` 用在「刚聊完一轮」——
+     * 本地刚写的东西要尽快让对方看到，而自己不需要为此再拉一遍。
+     *
+     * 没有 PC 地址就直接跳过（独立模式本来就允许没有 PC）。
+     * 同步失败**不影响**本地使用，只记一条状态。
+     */
+    private fun runSync(pushOnly: Boolean = false) {
+        val host = prefs.getString(KEY_HOST, null)
+        if (host.isNullOrBlank()) {
+            lastSyncText = "没配 PC（独立使用中）"
+            return
+        }
+        val port = prefs.getInt(KEY_PORT, DEFAULT_PORT)
+        if (!memorySyncing.compareAndSet(false, true)) {
+            Log.d(TAG, "上一次同步还没结束，跳过")
+            return
+        }
+        scope.launch {
+            val result = withContext(Dispatchers.IO) {
+                if (pushOnly) memorySync.pushOnly(host, port) else memorySync.sync(host, port)
+            }
+            lastSyncText = when (result) {
+                is com.mikuagent.pet.memory.SyncClient.Result.Ok ->
+                    "拉取 ${result.pulled} / 推送 ${result.pushed}" +
+                        if (result.created > 0) "（新建 ${result.created} 天）" else ""
+                is com.mikuagent.pet.memory.SyncClient.Result.Failed -> result.message
+            }
+            Log.i(TAG, "同步结果：$lastSyncText")
+            memorySyncing.set(false)
+            // 记忆变了，页面上的条数要跟着更新
+            if (pageReady) bridge.onStatus(lastStatus?.first ?: "connected", lastStatus?.second ?: "")
         }
     }
 
@@ -481,6 +537,16 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
             memory.counts().forEach { (k, v) -> put(k, v) }
         })
         val cfg = BrainConfig.load(this@MainActivity)
+        val st = memory.syncState()
+        put("sync", JSONObject().apply {
+            put("text", lastSyncText)
+            put("lastSyncAt", st.lastSyncAt)
+            put("pullWatermark", st.pullWatermark)
+            put("pushWatermark", st.pushWatermark)
+            put("lastPullCount", st.lastPullCount)
+            put("lastPushCount", st.lastPushCount)
+            put("lastError", st.lastError)
+        })
         put("tts", JSONObject().apply {
             put("status", tts.status(cfg))
             put("cacheBytes", tts.cacheSizeBytes())
@@ -543,6 +609,14 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
         BrainMode.save(prefs, m)
         brain = null   // 下次对话按新模式重挑
         Log.i(TAG, "对话通道切换为 ${m.id}（下次对话生效）")
+    }
+
+    /** 设置面板的「立即同步」。返回一句话给页面回显。 */
+    override fun onSyncNow(): String {
+        val host = prefs.getString(KEY_HOST, null)
+        if (host.isNullOrBlank()) return "还没配 PC 地址"
+        runSync()
+        return "同步中…"
     }
 
     override fun onStartRecording(): String {
@@ -632,6 +706,7 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
                     is Reply.Ok -> {
                         sessionId = reply.sessionId
                         deliverReply(reply.text, reply.emotion)
+                        runSync(pushOnly = true)
                     }
                     is Reply.Err -> runOnUiThread { bridge.onError(reply.message) }
                 }
@@ -753,6 +828,8 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
         player.stop()
         photoTaker.shutdown()
         remote.disconnect()
+        // 系统 TTS 引擎是全局资源，不关掉会一直占着
+        runCatching { tts.shutdown() }
         webView.destroy()
         super.onDestroy()
     }

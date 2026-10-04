@@ -73,6 +73,12 @@ data class SyncBundle(
 ) {
     val messageCount: Int get() = days.sumOf { it.messages.size }
 
+    /** 这批里最新的时间戳；分页时用它当下一个游标。 */
+    val maxUpdatedAt: Double
+        get() = (days.flatMap { it.messages }.map { it.updatedAt } +
+            memories.map { it.updatedAt } + meta.values.map { it.updatedAt })
+            .maxOrNull() ?: 0.0
+
     val isEmpty: Boolean
         get() = days.isEmpty() && memories.isEmpty() && meta.isEmpty()
 }
