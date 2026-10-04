@@ -976,7 +976,7 @@ function renderApiConfig() {
   $("sdsmodel").value = cfg.deepseekModel || "";
   $("scfgtip").textContent = "手机上要直连就得有自己的 Key（PC 设置窗口有「📋 复制 API 配置」）。"
     + "Key 存在"
-    + (cfg.secretsEncrypted ? "**加密**存储" : "应用私有目录（本机加密不可用，已退回普通存储）")
+    + (cfg.secretsEncrypted ? "加密存储" : "应用私有目录（本机加密不可用，已退回普通存储）")
     + "里；这里是脱敏显示，不重打就不会被清空。";
 }
 
