@@ -45,6 +45,18 @@ android {
     packaging {
         resources.excludes += setOf("META-INF/*.kotlin_module")
     }
+
+    // 把仓库根的 `shared/` 直接挂成 APK 的 assets。
+    //
+    // 里面只有 `persona.txt` —— 人设提示词。PC（backend/persona.py）与手机
+    // （brain/Persona.kt）读的是**同一个文件**，否则「人设」会变成两份，
+    // 以后改一次只改到一边，模型行为就会莫名其妙地分叉。
+    // 两端渲染结果由 tools/test_persona_parity.py + PersonaTest.kt 钉死。
+    sourceSets {
+        getByName("main") {
+            assets.srcDir("../../shared")
+        }
+    }
 }
 
 dependencies {
@@ -61,4 +73,10 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:1.3.4")
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+
+    // 单测：合并规则、人设渲染这类**纯逻辑**用 JVM 单测钉住，不跑模拟器。
+    testImplementation("junit:junit:4.13.2")
+    // org.json 在 android.jar 里是空壳（单测里调用会抛 "not mocked"），
+    // 所以单测要读 golden JSON 就得引一份真的实现。
+    testImplementation("org.json:json:20240303")
 }
