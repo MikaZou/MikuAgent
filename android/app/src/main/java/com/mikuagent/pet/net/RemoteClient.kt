@@ -92,7 +92,15 @@ class RemoteClient(private val onEvent: (Event) -> Unit) {
     fun connect(host: String, port: Int) {
         manuallyClosed = false
         val url = "ws://$host:$port/ws"
-        if (url == currentUrl && socket != null) return
+        if (url == currentUrl && socket != null) {
+            // 已经连着同一个地址了。**不能默默返回**：设置面板里点「重新连接」时，
+            // 页面会乐观地先显示「连接中…」，如果这里什么都不发，就再也没有后续
+            // 状态事件把它改回来 —— 界面会一直卡在「连接中…」（真机实测踩到）。
+            // 补发一次真实的「已连接」最省事，也不会骗人。
+            Log.i(TAG, "已连接 $url，无需重连；补发一次状态")
+            post(Event.Status(Event.State.CONNECTED, url))
+            return
+        }
 
         // 换地址时**必须**先关掉旧连接并作废它的重连，否则旧 socket 会一直活着
         val old = socket

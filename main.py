@@ -124,23 +124,6 @@ def main() -> int:
     control = AppControl(app, window=window, console=console, tts=tts)
     window.app_control = control
 
-    def change_phone_model(model_id: str) -> None:
-        """手机端模型由 PC 决定：写选择 + 推给已连接的手机。
-
-        **必须幂等**：`select()` 返回 False 表示选择没变，这时候什么都不做。
-        否则手机会被推着重新同步一遍模型并重载页面（贴图 30MB），
-        而实际上它已经在用这个模型了。
-        """
-        if not models_catalog.select("phone", model_id):
-            return
-        remote = getattr(window, "remote_controller", None)
-        if remote is not None:
-            try:
-                remote.set_phone_model(model_id)
-            except Exception as exc:  # noqa: BLE001
-                print(f"[Settings] 通知手机端失败：{exc}")
-        window.refresh_console()
-
     def change_watermark(visible: bool) -> None:
         SettingsDialog.set_watermark_visible(visible)
         window.set_watermark_visible(visible)
@@ -150,7 +133,6 @@ def main() -> int:
     console.reconfigure_requested.connect(window.open_reconfigure)
     console.quit_requested.connect(lambda: control.quit_all("设置窗口"))
     console.desktop_model_changed.connect(window.apply_model)
-    console.phone_model_changed.connect(change_phone_model)
     console.watermark_changed.connect(change_watermark)
     window.model_loaded.connect(lambda _info: window.refresh_console())
 

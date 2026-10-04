@@ -118,10 +118,6 @@ class RemoteServer:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._runner: Optional[web.AppRunner] = None
         self._clients = 0
-        # 活着的 WebSocket，用于「PC 控制台改了手机端模型 → 主动推给手机」。
-        # 手机是在**下载模型之前**就会收到这条消息的，所以推送必须可靠，
-        # 不能只在连接建立那一刻发一次（那时用户可能还没改）。
-        self._sockets: set = set()
         self._log_path = Path(config.DATA_DIR) / "remote.log"
 
     def _write_log(self, msg: str) -> None:
@@ -314,15 +310,15 @@ class RemoteServer:
         )
         await ws.prepare(request)
         self._clients += 1
-        self._sockets.add(ws)
         peer = request.remote
         _log(f"客户端接入 {peer}（当前 {self._clients} 个）")
         try:
             await ws.send_json({
                 "type": "ready",
                 "provider": self.provider_info(),
-                # 手机该用哪个模型由 PC 决定（控制台里改），连着一起下发，
-                # 手机端拿到后自己去 /model/<id>/manifest 同步。
+                # 只下**可用模型清单**，不下发「你该用哪个」—— 手机自己选。
+                # `phone_model` 仍然保留：老版本 APK 会读它，给个 PC 记下的值
+                # 总比给空好；新版手机拿到的是 last_phone_model 之外的东西也不理会。
                 "phone_model": models_catalog.selected("phone"),
                 "models": models_catalog.available(),
             })
@@ -334,7 +330,6 @@ class RemoteServer:
                     break
         finally:
             self._clients -= 1
-            self._sockets.discard(ws)
             _log(f"客户端断开 {peer}（剩余 {self._clients} 个）")
         return ws
 
@@ -354,15 +349,20 @@ class RemoteServer:
             elif kind == "audio":
                 await self._do_audio(ws, req, peer)
             elif kind == "set_model":
-                # 手机端自己换模型（界面上的模型按钮）→ 写回 PC 的选择，
-                # 再广播给所有客户端，让 PC 控制台和别的手机跟着一致。
+                # 手机**自己**在设置面板里换的模型，这里只是把它的选择记一笔。
+                #
+                # 为什么不广播回去：手机端是「自己用哪个模型」的主人。广播 config
+                # 会把 A 手机的选择强加到 B 手机上（两台手机互相打架），而发起方
+                # 本来就切好了、也不需要回音。PC 侧记这一笔只为了两件事：
+                #   1. data/model_prefs.json 里留个记录（设置窗口的状态行会显示）
+                #   2. /model/manifest（不带 id 的老写法）知道该给哪个模型
                 model_id = req.get("id") or ""
                 if models_catalog.get(model_id) is None:
                     await ws.send_json({"type": "error", "message": f"未知模型 {model_id}"})
                 else:
-                    models_catalog.select("phone", model_id)
-                    _log(f"{peer} 请求切换模型 → {model_id}")
-                    await self.broadcast_model(model_id)
+                    changed = models_catalog.select("phone", model_id)
+                    _log(f"{peer} 报告正在使用模型 {model_id}"
+                         + ("（已记录）" if changed else "（与记录一致）"))
                     if self.on_phone_model is not None:
                         try:
                             self.on_phone_model(model_id)
@@ -376,28 +376,6 @@ class RemoteServer:
                 await ws.send_json({"type": "error", "message": str(exc)})
             except Exception:  # noqa: BLE001
                 pass
-
-    async def broadcast_model(self, model_id: str) -> None:
-        """把「手机端该用哪个模型」推给所有在线客户端。"""
-        payload = {"type": "config", "phone_model": model_id}
-        for ws in list(self._sockets):
-            try:
-                await ws.send_json(payload)
-            except Exception:  # noqa: BLE001
-                self._sockets.discard(ws)
-
-    def push_model(self, model_id: str) -> None:
-        """从别的线程（Qt 主线程）请求广播。
-
-        WebSocket 只能在它自己那个事件循环里发，所以这里把协程丢回去。
-        """
-        loop = self._loop
-        if loop is None:
-            return
-        try:
-            asyncio.run_coroutine_threadsafe(self.broadcast_model(model_id), loop)
-        except Exception as exc:  # noqa: BLE001
-            _log(f"推送模型切换失败：{exc}")
 
     async def _do_chat(self, ws, req: dict, peer: str) -> None:
         text = (req.get("text") or "").strip()
@@ -662,19 +640,6 @@ class RemoteController:
         self._server = server
         self._port = port
         return True
-
-    def set_phone_model(self, model_id: str) -> None:
-        """PC 控制台改了手机端模型 → 推给所有在线手机。
-
-        只写选择、不重启服务：模型是按 id 提供文件的，换 id 不需要动端口。
-        选择没变就直接返回 —— 别让手机白白重新同步一遍模型。
-        """
-        if not models_catalog.select("phone", model_id):
-            return
-        server = self._server
-        if server is not None:
-            server.push_model(model_id)
-        _log(f"手机端模型已切到 {model_id}")
 
     def _stop_locked(self) -> None:
         server = self._server

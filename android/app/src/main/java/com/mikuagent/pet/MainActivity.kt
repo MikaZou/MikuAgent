@@ -26,6 +26,7 @@ import com.mikuagent.pet.model.ModelSync
 import com.mikuagent.pet.net.RemoteClient
 import com.mikuagent.pet.web.AssetServer
 import com.mikuagent.pet.web.Bridge
+import org.json.JSONObject
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -70,20 +71,17 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
     private var lastStatus: Pair<String, String>? = null
 
     /**
-     * 最近一次拿到的「可用模型清单」与「当前手机端模型」。
+     * 最近一次拿到的「可用模型清单」。
      *
      * 和 lastStatus 同一个道理：PC 的 `ready` 往往**早于**页面脚本就绪，
-     * 那时 `evaluateJavascript` 打过去是空放一炮 —— 结果就是状态栏上
-     * 那个「模型 xx」按钮永远不出现（真机实测踩到）。所以这里存一份补发。
+     * 那时 `evaluateJavascript` 打过去是空放一炮 —— 结果就是设置面板里
+     * 列不出模型（真机实测踩到）。所以这里存一份补发。
      *
-     * 清单和当前值**分开存**：换模型时 PC 只发 `config`（不带清单），
-     * 若把清单一起覆盖成空，重载页面后按钮就会消失。
+     * 不再需要单独存「当前用哪个」：手机自己就是权威，那个值永远是
+     * [activeModelId]。
      */
     @Volatile
     private var lastModelsJson: String? = null
-
-    @Volatile
-    private var lastPhoneModel: String? = null
 
     /** 语音输入时是否自动附一张画面（对应 PC 的「视频对话」开关）。 */
     private var videoMode = false
@@ -192,7 +190,7 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
         val host = saved ?: defaultHostForPlatform()
         if (host != null) {
             Log.i(TAG, "自动连接 PC 地址 $host（来源：${if (saved != null) "上次保存" else "模拟器默认"}）")
-            startConnecting(host)
+            startConnecting(host, prefs.getInt(KEY_PORT, DEFAULT_PORT))
         } else {
             Log.i(TAG, "尚未配置 PC 地址，等用户在界面上填")
         }
@@ -214,8 +212,13 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
 
     // ------------------------------------------------------------ 连接与同步
 
-    private fun startConnecting(host: String) {
-        val port = prefs.getInt(KEY_PORT, DEFAULT_PORT)
+    /**
+     * 连接并同步模型。
+     *
+     * 端口以前是写死「读 SharedPreferences」的，现在由调用方给 —— 设置面板里
+     * 可以改端口了（有些人 PC 上 8765 被占，只能换一个）。
+     */
+    private fun startConnecting(host: String, port: Int) {
         prefs.edit().putString(KEY_HOST, host).putInt(KEY_PORT, port).apply()
         remote.connect(host, port)
         syncModel(host, port)
@@ -294,14 +297,13 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
             is RemoteClient.Event.Ready -> {
                 bridge.onProvider(e.provider.toString())
                 lastModelsJson = e.modelsJson
-                lastPhoneModel = e.phoneModel.ifBlank { activeModelId }
-                bridge.onModels(lastModelsJson ?: "[]", lastPhoneModel ?: activeModelId)
+                // 只取**可用清单**。`phone_model` 是 PC 那边记的一笔账，
+                // **不用来覆盖本机选择** —— 否则用户在手机设置里选的模型，
+                // 每次连上 PC 都会被重置回 PC 记着的那个。
+                bridge.onModels(lastModelsJson ?: "[]", activeModelId)
+                // 顺手告诉 PC 本机现在用哪个（PC 只记录，不会广播回来）
+                remote.sendSetModel(activeModelId)
                 bridge.onStatus("connected", "已连接")
-                // PC 说的模型才算数（控制台是唯一权威）
-                if (e.phoneModel.isNotBlank() && e.phoneModel != activeModelId) {
-                    switchModel(e.phoneModel, "PC 下发")
-                    return
-                }
                 // 连上之前同步可能失败过（PC 刚起来、网络抖动）；
                 // 这里补一次，否则模型就永远不加载了。
                 if (!modelReady) {
@@ -311,9 +313,9 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
                 }
             }
             is RemoteClient.Event.Config -> {
-                lastPhoneModel = e.phoneModel
-                bridge.onModels(lastModelsJson ?: "[]", e.phoneModel)
-                switchModel(e.phoneModel, "PC 广播")
+                // 旧版 PC 会广播「你该用哪个模型」。现在手机自己说了算，
+                // 所以**不跟着改**；记一条方便排查新旧版本混用。
+                Log.i(TAG, "PC 广播了模型 ${e.phoneModel}，本机保持 $activeModelId")
             }
             is RemoteClient.Event.Transcript -> bridge.onTranscript(e.text)
             is RemoteClient.Event.Reply -> bridge.onReply(e.text, e.emotion)
@@ -346,11 +348,28 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
         remote.sendChat(text, imageBase64)
     }
 
-    override fun onConnect(host: String) {
+    override fun onConnect(host: String, port: Int) {
         if (host.isBlank()) return
-        Log.i(TAG, "用户指定 PC 地址: $host")
-        startConnecting(host)
+        Log.i(TAG, "用户指定 PC 地址: $host:$port")
+        startConnecting(host, port)
     }
+
+    /**
+     * 设置面板要显示的「原生侧状态」。
+     *
+     * 页面拿不到 PC 地址/端口/贴图倍率（那些只在 SharedPreferences 与 AssetServer 里），
+     * 所以在这里打包成 JSON 一次给它。
+     */
+    override fun onDeviceState(): String = JSONObject().apply {
+        put("host", prefs.getString(KEY_HOST, "") ?: "")
+        put("port", prefs.getInt(KEY_PORT, DEFAULT_PORT))
+        put("model", activeModelId)
+        put("connected", remote.isConnected)
+        put("status", lastStatus?.second ?: "")
+        put("textureScale", assets.textureScale)
+        put("videoMode", videoMode)
+        put("modelReady", modelReady)
+    }.toString()
 
     override fun onStartRecording(): String {
         val granted = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
@@ -400,16 +419,16 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
     }
 
     /**
-     * 手机界面上的模型按钮：只发请求，真正切换等 PC 用 `config` 广播回来。
+     * 手机界面上的模型单选项。
      *
-     * 为什么不本地直接切：PC 控制台也要显示「手机端现在用哪个模型」，
-     * 两边各切各的就会出现「手机上是新模型、控制台上写着经典模型」。
+     * **本地直接切**：手机就是「自己用哪个模型」的主人（PC 上已经没有这个设置项了）。
+     * 切完顺手把选择告诉 PC 记一笔 —— 只影响 `data/model_prefs.json` 的 `phone`
+     * 与老写法的 `/model/manifest`，PC 不会再广播回来。
      */
     override fun onSetModel(id: String) {
-        if (id.isBlank()) return
-        if (id == activeModelId) return
-        Log.i(TAG, "请求 PC 切换到 $id")
-        bridge.onStatus("syncing", "正在切换模型…")
+        if (id.isBlank() || id == activeModelId) return
+        Log.i(TAG, "手机设置里换模型 -> $id")
+        switchModel(id, "手机设置")
         remote.sendSetModel(id)
     }
 
@@ -448,7 +467,7 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
         // 模型清单同理：ready 早于页面就绪时那次 JS 调用是空放的
         val models = lastModelsJson
         if (models != null) {
-            bridge.onModels(models, lastPhoneModel ?: activeModelId)
+            bridge.onModels(models, activeModelId)
         }
         if (modelReady) bridge.loadModel()
     }

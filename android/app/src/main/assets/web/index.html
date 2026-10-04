@@ -19,14 +19,91 @@
   }
   #dot { width: 8px; height: 8px; border-radius: 50%; background: #f59e0b; flex: none; }
   #dot.on { background: #39c5bb; } #dot.err { background: #ef4444; }
-  #engine { opacity: .75; font-size: 11px; }
-  /* 模型切换：手机上也能换，和 PC 控制台是同一份选择（PC 广播回来才算数）。 */
-  #model {
-    position: fixed; top: 8px; right: 72px; z-index: 30;
-    font-size: 11px; line-height: 1; padding: 6px 10px; border-radius: 999px;
+  #engine { opacity: .75; font-size: 11px; max-width: 46%; white-space: nowrap;
+            overflow: hidden; text-overflow: ellipsis; }
+  /* 当前模型名：只读标签。**切换**放在设置面板里（见 #settings），
+     状态栏只负责告诉你现在是哪个，不当按钮用。 */
+  #modelname { font-size: 11px; color: #7fe3da; margin-left: 8px;
+               white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+               max-width: 32%; }
+  #topbar { padding-right: 92px; }
+
+  /* 设置齿轮 */
+  #gear {
+    position: fixed; top: 8px; right: 8px; z-index: 30;
+    width: 34px; height: 34px; border-radius: 50%;
     border: 1px solid rgba(57,197,187,.45); background: rgba(57,197,187,.16);
-    color: #7fe3da; font-family: inherit;
+    color: #7fe3da; font-size: 16px; line-height: 1; font-family: inherit;
   }
+  #gear:active { background: rgba(57,197,187,.35); }
+
+  /* 水印快捷开关（设置面板里也有一个，两边同步） */
+  #wm {
+    position: fixed; top: 12px; right: 50px; z-index: 30;
+    font-size: 11px; line-height: 1; padding: 5px 9px; border-radius: 999px;
+    border: 1px solid rgba(57,197,187,.45); background: rgba(57,197,187,.16);
+    color: #7fe3da; font-family: inherit; cursor: pointer;
+  }
+  #wm.off { border-color: rgba(255,255,255,.18); background: rgba(255,255,255,.06); color: #8b929c; }
+
+  /* ---------------------------------------------------------------- 设置面板 */
+  #settings {
+    position: fixed; inset: 0; z-index: 50; background: #0b0f14d9;
+    display: flex; flex-direction: column; justify-content: flex-end;
+  }
+  #settings.hide { display: none; }
+  #settings .sheet {
+    background: #151c24; border-radius: 16px 16px 0 0; max-height: 88vh;
+    display: flex; flex-direction: column; color: #dbe7ea;
+    box-shadow: 0 -8px 30px #000a;
+  }
+  #settings .shead {
+    display: flex; align-items: center; padding: 14px 16px 10px;
+    border-bottom: 1px solid #223039; flex: none;
+  }
+  #settings .shead b { font-size: 16px; color: #39c5bb; flex: 1; }
+  #settings .shead button {
+    border: none; background: #223039; color: #cfe9e6; width: 30px; height: 30px;
+    border-radius: 50%; font-size: 15px; line-height: 1;
+  }
+  #settings .sbody { overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 6px 16px 22px; }
+  #settings section { padding: 12px 0; border-bottom: 1px solid #1d2831; }
+  #settings section:last-child { border-bottom: none; }
+  #settings h3 { margin: 0 0 8px; font-size: 13px; color: #7fe3da; font-weight: 600; }
+  #settings .tip { margin: 6px 0 0; font-size: 11px; line-height: 1.6; color: #8b9aa3; }
+  #settings .row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+  #settings .row label { font-size: 13px; width: 72px; flex: none; color: #b9c7cc; }
+  #settings .row input {
+    flex: 1; min-width: 0; border: 1px solid #2b3a42; border-radius: 8px;
+    padding: 9px 10px; font-size: 14px; background: #0f161c; color: #e8f4f2; outline: none;
+  }
+  #settings .wide {
+    width: 100%; margin-top: 8px; border: none; border-radius: 10px;
+    padding: 11px; font-size: 14px; font-weight: 600;
+    background: #39c5bb; color: #06231f; font-family: inherit;
+  }
+  #settings .check { display: flex; align-items: center; gap: 10px; font-size: 14px; padding: 8px 0; }
+  #settings .check input { width: 20px; height: 20px; accent-color: #39c5bb; flex: none; }
+  #settings .check span small { display: block; color: #8b9aa3; font-size: 11px; margin-top: 2px; }
+
+  /* 模型单选项 */
+  .mopt {
+    display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; margin: 6px 0;
+    border: 1px solid #26343d; border-radius: 10px; background: #101820;
+  }
+  .mopt.on { border-color: #39c5bb; background: #12262a; }
+  .mopt.dim { opacity: .45; }
+  .mopt .radio {
+    width: 18px; height: 18px; border-radius: 50%; flex: none; margin-top: 2px;
+    border: 2px solid #4a5b64;
+  }
+  .mopt.on .radio { border-color: #39c5bb; background:
+      radial-gradient(circle, #39c5bb 0 5px, transparent 5px); }
+  .mopt .mname { font-size: 14px; color: #e8f4f2; }
+  .mopt .mnote { font-size: 11px; color: #8b9aa3; margin-top: 3px; line-height: 1.5; }
+  #settings .kv { display: flex; font-size: 12px; line-height: 1.9; }
+  #settings .kv b { color: #8b9aa3; font-weight: 400; width: 84px; flex: none; }
+  #settings .kv span { color: #cfe9e6; word-break: break-all; }
 
   /* 气泡 */
   #bubble {
@@ -42,15 +119,9 @@
           background: rgba(57,197,187,.16); border-radius: 999px;
           padding: 1px 8px; margin-bottom: 4px; }
 
-  /* 水印开关。模型说明第 4 条要求「水印按键默认打开，需在设置表情中关闭」，
-     所以这里按默认开、一键可关。 */
-  #wm {
-    position: fixed; top: 10px; right: 10px; z-index: 30;
-    font-size: 11px; line-height: 1; padding: 5px 9px; border-radius: 999px;
-    border: 1px solid rgba(57,197,187,.45); background: rgba(57,197,187,.16);
-    color: #7fe3da; font-family: inherit; cursor: pointer;
-  }
-  #wm.off { border-color: rgba(255,255,255,.18); background: rgba(255,255,255,.06); color: #8b929c; }
+  /* 水印开关的位置与外观在上面的「设置齿轮」一节里统一定义（#wm）。
+     这里只留说明：模型说明第 4 条要求「水印按键默认打开，需在设置表情中关闭」，
+     所以按默认开、一键可关。 */
 
   /* 长按不要触发文字选中 / 系统上下文菜单。
      踩过的坑：按住麦克风说话时，长按会被 WebView 当成「选中文字」，
@@ -104,12 +175,13 @@
 
 <div id="topbar">
   <span id="dot"></span><span id="status">初始化…</span>
+  <span id="modelname"></span>
   <span id="engine" style="margin-left:auto"></span>
 </div>
 
 <div id="bubble"><span id="chip"></span><div id="btext"></div></div>
 
-<button id="model" title="切换 Live2D 模型">模型</button>
+<button id="gear" title="设置">⚙</button>
 <button id="wm" title="水印开关（模型默认打开）">水印</button>
 
 <div id="bar">
@@ -120,12 +192,54 @@
   <button class="btn primary" id="send" title="发送">➤</button>
 </div>
 
+<!-- 设置面板。手机端自己的设置都在这里：换模型、改 PC 地址、水印、视频对话、状态。
+     以前换模型是状态栏上一个「点一下往后轮」的按钮 —— 看不到有哪些模型、
+     也回不到上一个，所以改成正经的单选项。 -->
+<div id="settings" class="hide">
+  <div class="sheet">
+    <div class="shead"><b>设置</b><button id="sclose" title="关闭">✕</button></div>
+    <div class="sbody">
+      <section>
+        <h3>Live2D 模型</h3>
+        <div id="mlist"></div>
+        <p class="tip" id="mtip">换完手机会自己重新同步该模型并刷新画面；用过的模型缓存在手机上，切回去几乎瞬间完成。</p>
+      </section>
+
+      <section>
+        <h3>连接 PC</h3>
+        <div class="row"><label>地址</label>
+          <input id="shost" inputmode="url" placeholder="192.168.20.102" autocomplete="off"></div>
+        <div class="row"><label>端口</label>
+          <input id="sport" inputmode="numeric" placeholder="8765" autocomplete="off"></div>
+        <button class="wide" id="sconnect">重新连接</button>
+        <p class="tip">Miku 的大脑跑在 PC 上。连不上时先确认 PC 端的 MikuAgent 开着，
+          而且手机和 PC 在同一个网络里（模拟器填 10.0.2.2）。</p>
+      </section>
+
+      <section>
+        <h3>开关</h3>
+        <label class="check"><input type="checkbox" id="swm">
+          <span>显示模型水印<small>模型说明要求默认打开；这里默认关掉</small></span></label>
+        <label class="check"><input type="checkbox" id="svideo">
+          <span>视频对话<small>说话结束时自动拍一张给 Miku 看，不持续推流</small></span></label>
+      </section>
+
+      <section>
+        <h3>状态</h3>
+        <div id="sinfo"></div>
+      </section>
+    </div>
+  </div>
+</div>
+
 <div id="setup">
   <h2>连接你的 PC</h2>
   <p>Miku 的大脑跑在 PC 上。请填 PC 的局域网地址<br>
      （PC 端气泡里会显示，形如 <code>192.168.20.102</code>；<br>
      安卓模拟器请填 <code>10.0.2.2</code>）</p>
   <input id="host" inputmode="url" placeholder="192.168.20.102" autocomplete="off">
+  <input id="port" inputmode="numeric" placeholder="8765" autocomplete="off"
+         style="max-width:320px;margin-top:8px">
   <button class="go" id="connect">连接</button>
   <p style="font-size:12px;opacity:.6">端口默认 8765</p>
 </div>
@@ -209,26 +323,79 @@ function setWatermark(hidden) {
     btn.classList.toggle("off", watermarkHidden);
     btn.textContent = watermarkHidden ? "水印 关" : "水印";
   }
+  // 设置面板里那个勾选框要跟着走（状态栏按钮和面板是同一个开关的两处入口）
+  const box = $("swm");
+  if (box) {
+    settingsLoading = true;
+    box.checked = !watermarkHidden;
+    settingsLoading = false;
+  }
 }
 
-/** 状态栏上的模型名 + 「点一下换模型」。清单和当前值都由 PC 下发。 */
-function renderModelButton() {
-  const btn = $("model");
-  if (!btn) return;
+/** 状态栏上的模型名（只读）。**切换**在设置面板里，见 renderModelList()。 */
+function renderModelLabel() {
+  const el = $("modelname");
+  if (!el) return;
   const cur = MODELS.find((m) => m.id === currentModel);
-  btn.textContent = cur ? ("模型 " + (cur.short || cur.name)) : "";
-  btn.style.display = MODELS.length > 1 ? "" : "none";
+  el.textContent = cur ? ("模型 " + (cur.short || cur.name)) : "";
 }
 
-function cycleModel() {
-  if (MODELS.length < 2) return;
-  const order = MODELS.map((m) => m.id);
-  const i = Math.max(0, order.indexOf(currentModel));
-  const next = order[(i + 1) % order.length];
-  // 只发请求：真正切换等 PC 广播 config 回来，这样 PC 控制台和所有手机一致
-  showBubble("正在换成「" + ((MODELS.find((m) => m.id === next) || {}).name || next) + "」…", "NORMAL");
+/**
+ * 设置面板里的模型单选项。
+ *
+ * 为什么不用「点一下往后轮」的按钮：模型越多，轮换越难用 —— 看不到有哪些、
+ * 也不知道下一个是谁，更回不到「上一个」。单选项一眼看全，也不怕误触。
+ */
+function renderModelList() {
+  const box = $("mlist");
+  if (!box) return;
+  if (!MODELS.length) {
+    box.innerHTML = '<p class="tip">还没收到 PC 的模型清单（连上 PC 之后会出现）。</p>';
+    return;
+  }
+  box.innerHTML = "";
+  MODELS.forEach((m) => {
+    const el = document.createElement("div");
+    const on = m.id === currentModel;
+    el.className = "mopt" + (on ? " on" : "") + (m.present === false ? " dim" : "");
+    el.dataset.id = m.id;
+    const radio = document.createElement("div");
+    radio.className = "radio";
+    const txt = document.createElement("div");
+    const name = document.createElement("div");
+    name.className = "mname";
+    name.textContent = m.name || m.id;
+    const note = document.createElement("div");
+    note.className = "mnote";
+    note.textContent = (m.note || "") + (m.present === false ? "（PC 上没有这个模型）" : "");
+    txt.appendChild(name);
+    txt.appendChild(note);
+    el.appendChild(radio);
+    el.appendChild(txt);
+    // 已经是当前模型就不发请求（幂等，免得白白重载一次页面）
+    el.onclick = () => { if (!on && m.present !== false) requestModel(m.id); };
+    box.appendChild(el);
+  });
+}
+
+/**
+ * 换模型。
+ *
+ * 手机**自己**就是「用哪个模型」的主人：原生侧直接换、重新同步、重载页面。
+ * 只顺手把选择告诉 PC 记一笔（PC 那边已经没有这个设置项了，它只负责按 id
+ * 提供模型文件；记一笔是为了 data/model_prefs.json 的 `phone` 与老写法的
+ * /model/manifest 还能对上）。
+ *
+ * 以前是「请求 PC，等它广播回来才切」—— PC 上那个设置项已经去掉了，
+ * 再绕一圈没有意义，而且 PC 不在时还切不了。
+ */
+function requestModel(id) {
+  if (id === currentModel) return;
+  const cur = MODELS.find((m) => m.id === id) || {};
+  closeSettings();
+  showBubble("正在换成「" + (cur.name || id) + "」…", "NORMAL");
   setStatus("切换模型中…");
-  native && native.setModel && native.setModel(next);
+  native && native.setModel && native.setModel(id);
 }
 
 // 贴图诊断：pixi-live2d-display 不同版本把 textures 挂在 internalModel 上，
@@ -627,7 +794,12 @@ window.Miku = {
       const list = JSON.parse(json);
       if (Array.isArray(list) && list.length) MODELS = list.filter((m) => m.present !== false);
       if (current) currentModel = current;
-      renderModelButton();
+      renderModelLabel();
+      // 面板开着就顺手刷新，否则用户会看到过期的列表
+      if (!$("settings").classList.contains("hide")) {
+        renderModelList();
+        syncSettingsUI();
+      }
     } catch (e) { console.warn("模型清单解析失败: " + e.message); }
   },
   onStatus(state, detail) {
@@ -644,6 +816,86 @@ window.Miku = {
     setStatus("已就绪", "on");
     showBubble("呜…" + msg, "SAD");
   },
+};
+
+// ---------------------------------------------------------------- 设置面板
+//
+// 手机端自己的设置都在这里。以前只有首次运行时那个「填 PC 地址」的浮层，
+// 连上之后就没地方改地址了；换模型也只有状态栏一个轮换按钮。现在统一收进设置。
+
+function openSettings() {
+  renderModelList();
+  syncSettingsUI();
+  $("settings").classList.remove("hide");
+}
+function closeSettings() {
+  $("settings").classList.add("hide");
+}
+
+/** 把原生与本地的当前值回填到设置面板（不触发任何信号）。 */
+function syncSettingsUI() {
+  let st = {};
+  try {
+    st = JSON.parse((native && native.deviceState && native.deviceState()) || "{}");
+  } catch (e) { st = {}; }
+  if (st.host) $("shost").value = st.host;
+  if (st.port) $("sport").value = st.port;
+  // 勾选状态用 _loading 护住：程序化赋值不该反过来触发「用户改了」的处理
+  settingsLoading = true;
+  $("swm").checked = !watermarkHidden;
+  $("swm").disabled = !WM_PARAM;
+  $("svideo").checked = !!videoMode;
+  settingsLoading = false;
+
+  // Core / 屏幕只有页面自己知道（原生侧看不到 canvas 这些）
+  let coreVer = "-";
+  try {
+    const v = Live2DCubismCore.Version.csmGetVersion();
+    coreVer = (v >>> 24) + "." + ((v >>> 16) & 255) + "." + ((v >>> 8) & 255);
+  } catch (e) { /* Core 还没加载 */ }
+
+  const rows = [
+    ["连接", st.connected ? "已连接" : (st.status || "未连接")],
+    ["PC 地址", (st.host || "未设置") + ":" + (st.port || "?")],
+    ["当前模型", currentModel || "未就绪"],
+    ["模型数量", MODELS.length
+        ? (MODELS.length + " 个（" + MODELS.filter((m) => m.present !== false).length + " 个可用）")
+        : "未收到清单"],
+    ["贴图", st.textureScale && st.textureScale < 0.999
+        ? ("已降到 " + Math.round(st.textureScale * 100) + "%（省显存）") : "原尺寸 4096"],
+    ["Core", coreVer],
+    ["屏幕", innerWidth + "x" + innerHeight + " @" + (window.devicePixelRatio || 1) + "x"],
+  ];
+  $("sinfo").innerHTML = rows.map(([k, v]) =>
+    '<div class="kv"><b>' + k + '</b><span>' + String(v)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;") + '</span></div>').join("");
+}
+
+let settingsLoading = false;
+
+$("gear").onclick = openSettings;
+$("sclose").onclick = closeSettings;
+// 点空白处（面板外的遮罩）也关掉
+$("settings").addEventListener("click", (e) => { if (e.target.id === "settings") closeSettings(); });
+
+$("sconnect").onclick = () => {
+  const h = $("shost").value.trim();
+  const p = parseInt($("sport").value, 10) || 8765;
+  if (!h) { showBubble("先填一下 PC 的地址吧～", "SAD"); return; }
+  closeSettings();
+  setStatus("连接中…");
+  native && native.connect && native.connect(h, p);
+};
+
+$("swm").onchange = () => {
+  if (settingsLoading || !WM_PARAM) return;
+  setWatermark(!$("swm").checked);          // 勾上 = 显示水印
+  showBubble(watermarkHidden ? "水印关掉了哦" : "水印开回来啦～", "NORMAL");
+};
+
+$("svideo").onchange = () => {
+  if (settingsLoading) return;
+  setVideoMode(!!$("svideo").checked);
 };
 
 // ---------------------------------------------------------------- 交互
@@ -712,18 +964,26 @@ window.Miku.onPhoto = (b64) => {
 
 // 视频对话开关。和 PC 同一套做法：**不推流**，只在说完一句话时自动附一张画面。
 // 好处是摄像头不会一直开着（指示灯常亮是隐私问题），也不费流量。
+// 输入栏的 📹 和设置面板里的勾选框是同一个开关。
 let videoMode = localStorage.getItem("miku_video_mode") === "1";
 function applyVideoMode() {
   const b = $("video");
   if (b) b.classList.toggle("on", videoMode);
+  const box = $("svideo");
+  if (box) {
+    settingsLoading = true;
+    box.checked = !!videoMode;
+    settingsLoading = false;
+  }
   native.setVideoMode && native.setVideoMode(videoMode);
 }
-$("video").onclick = () => {
-  videoMode = !videoMode;
+function setVideoMode(on) {
+  videoMode = !!on;
   localStorage.setItem("miku_video_mode", videoMode ? "1" : "0");
   applyVideoMode();
   showBubble(videoMode ? "视频对话打开啦～以后你说话时我会顺便看一眼☆" : "视频对话关掉了哦", "NORMAL");
-};
+}
+$("video").onclick = () => setVideoMode(!videoMode);
 
 // 水印开关。Param137=1 是隐藏，默认隐藏；想显示回来点一下。
 $("wm").onclick = () => {
@@ -732,15 +992,15 @@ $("wm").onclick = () => {
   showBubble(watermarkHidden ? "水印关掉了哦" : "水印开回来啦～", "NORMAL");
 };
 
-// 模型切换（手机端入口；PC 控制台上也能改同一个选择）
-$("model").onclick = cycleModel;
-renderModelButton();
+// 模型名只读显示；**切换**在设置面板里（见 renderModelList）
+renderModelLabel();
 
 $("connect").onclick = () => {
   const h = $("host").value.trim();
+  const p = parseInt($("port").value, 10) || 8765;
   if (!h) return;
   // 交给原生发起连接（页面自己不碰网络，避免 mixed-content 限制）
-  native && native.connect && native.connect(h);
+  native && native.connect && native.connect(h, p);
   $("setup").classList.add("hide");
   setStatus("连接中…");
 };

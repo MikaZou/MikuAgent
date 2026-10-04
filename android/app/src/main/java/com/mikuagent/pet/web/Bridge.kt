@@ -27,8 +27,8 @@ class Bridge(
     /** 由 MainActivity 实现，把桥上的调用接到真正的原生逻辑。 */
     interface Actions {
         fun onChat(text: String, imageBase64: String?)
-        /** 页面填了 PC 地址后发起连接（页面自己不碰网络） */
-        fun onConnect(host: String)
+        /** 页面填了 PC 地址与端口后发起连接（页面自己不碰网络） */
+        fun onConnect(host: String, port: Int)
         /** @return 空串表示开始成功，否则是给用户看的错误信息 */
         fun onStartRecording(): String
         fun onStopRecording()
@@ -45,6 +45,13 @@ class Bridge(
          * 才做，这样 PC 控制台和所有手机的显示永远一致。
          */
         fun onSetModel(id: String)
+        /**
+         * 设置面板要显示的原生侧状态（JSON 字符串）。
+         *
+         * 页面拿不到自己的 PC 地址/端口/贴图倍率 —— 那些只在原生侧（SharedPreferences、
+         * AssetServer），所以由原生一次性打包给它，省得页面去猜。
+         */
+        fun onDeviceState(): String
         /** 页面脚本**初始化完成**（与「模型渲染成功」是两件事） */
         fun onPageAlive()
         /** 页面自己也需要知道连接状态时用 */
@@ -68,7 +75,11 @@ class Bridge(
     fun chat(text: String) = actions.onChat(text, null)
 
     @JavascriptInterface
-    fun connect(host: String) = actions.onConnect(host.trim())
+    fun connect(host: String, port: Int) = actions.onConnect(host.trim(), port)
+
+    /** 设置面板打开时调用，拿原生侧的地址/端口/贴图倍率等。 */
+    @JavascriptInterface
+    fun deviceState(): String = actions.onDeviceState()
 
     @JavascriptInterface
     fun chatWithImage(text: String, imageBase64: String) =

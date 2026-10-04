@@ -38,6 +38,11 @@ HEALTH = {"mock": False, "has_api_key": True, "model": "deepseek-flash",
 
 
 def make_state(desktop: str, phone: str, watermark: bool = False) -> dict:
+    """与 PetWindow.state_for_console() 保持同样的形状。
+
+    phone_text 用的是真实产出的措辞（含「手机自己选的」），否则状态行那条断言
+    测的就不是真实文本了。
+    """
     return {
         "pet_visible": True,
         "desktop_model": desktop,
@@ -46,7 +51,7 @@ def make_state(desktop: str, phone: str, watermark: bool = False) -> dict:
         "watermark_param": "Param137" if desktop == "miku_v5" else None,
         "watermark_visible": watermark,
         "model_text": desktop,
-        "phone_text": phone,
+        "phone_text": f"当前用「{phone}」（手机自己选的）　已开启：http://127.0.0.1:8765/",
         "voice_text": "x",
         "session_text": "#1",
     }
@@ -57,43 +62,45 @@ def main() -> int:
     dlg = SettingsDialog()
 
     desktop_events: list[str] = []
-    phone_events: list[str] = []
     wm_events: list[bool] = []
     dlg.desktop_model_changed.connect(desktop_events.append)
-    dlg.phone_model_changed.connect(phone_events.append)
     dlg.watermark_changed.connect(wm_events.append)
+
+    # ---- 0) PC 端**不该**再有「手机端模型」这个设置 ----
+    # 手机用哪个模型由手机自己在设置面板里选；PC 只按 id 提供文件、并记一笔。
+    # 这条断言就是防止它哪天又被加回来。
+    check("PC 设置里没有手机端模型选择器", not hasattr(dlg, "picker_phone"))
+    check("PC 设置里不再有 phone_model_changed 信号",
+          not hasattr(dlg, "phone_model_changed"))
+    check("手机端状态行仍然显示「手机自己选的」",
+          "手机自己选的" in dlg._rows["phone"].text()
+          or dlg._rows["phone"].text() in ("-", ""),
+          dlg._rows["phone"].text())
 
     # ---- 1) 首次装载状态：不该发出任何「换模型」信号 ----
     dlg.load_state(HEALTH, "ready", "ready", "主人", console=make_state("miku_v5", "miku_v5"))
     check("首次装载不发 desktop 信号", desktop_events == [], str(desktop_events))
-    check("首次装载不发 phone 信号", phone_events == [], str(phone_events))
     check("首次装载不发 water 信号", wm_events == [], str(wm_events))
 
     # ---- 2) 状态没变时重复刷新：依然不该发 ----
     for _ in range(5):
         dlg.apply_console_state(make_state("miku_v5", "miku_v5"))
-    check("重复刷新不发信号", desktop_events == [] and phone_events == [],
-          f"desktop={desktop_events} phone={phone_events}")
+    check("重复刷新不发信号", desktop_events == [], str(desktop_events))
 
-    # ---- 3) 程序化同步（PC 端 / 别的手机改了）只更新显示，**不发**信号 ----
-    # 发信号意味着「请求切换」，而切换本身已经发生了 —— 回声会把手机
-    # 反复推去重新同步模型（贴图 30MB，白下载、白闪屏）。
+    # ---- 3) 手机端换了模型（手机自己报上来的）→ 只更新状态行，不发任何信号 ----
     dlg.apply_console_state(make_state("miku_v5", "miku"))
-    check("程序化同步 phone 不发信号", phone_events == [], str(phone_events))
-    check("程序化同步会把选中项同步过来", dlg.picker_phone._buttons["miku"].isChecked())
+    check("手机换模型不会让 PC 发出信号",
+          desktop_events == [] and wm_events == [],
+          f"desktop={desktop_events} wm={wm_events}")
+    check("状态行会跟着改成手机报上来的模型",
+          "手机自己选的" in dlg._rows["phone"].text(), dlg._rows["phone"].text())
 
-    # ---- 4) 模拟用户点击：应该恰好发一次 ----
+    # ---- 4) 模拟用户点击桌面端模型：应该恰好发一次 ----
     # 直接 setChecked 绕开 set_state，就等价于用户点了那个单选钮。
-    dlg.picker_phone._buttons["miku_v5"].setChecked(True)
-    check("用户点选后恰好发一次", phone_events == ["miku_v5"], str(phone_events))
-    dlg.apply_console_state(make_state("miku_v5", "miku_v5"))
-    check("程序化同步同一个值不再发", phone_events == ["miku_v5"], str(phone_events))
-
-    # ---- 5) 桌面端换模型：发 desktop 信号，且**不**误发 phone ----
-    phone_events.clear()
     dlg.picker_desktop._buttons["miku"].setChecked(True)
     check("用户换桌面模型发 desktop 一次", desktop_events == ["miku"], str(desktop_events))
-    check("桌面端换模型不误发 phone", phone_events == [], str(phone_events))
+    dlg.apply_console_state(make_state("miku", "miku"))
+    check("程序化同步同一个值不再发", desktop_events == ["miku"], str(desktop_events))
 
     # ---- 6) 程序化改水印勾选不该反过来发信号（否则会来回打架）----
     wm_events.clear()
@@ -105,14 +112,14 @@ def main() -> int:
     dlg.apply_console_state(make_state("miku", "miku_v5", watermark=False))
     check("经典模型下水印选项被禁用", not dlg._watermark_check.isEnabled())
 
-    # ---- 8) 本地缺失的模型要标出来且不可选 ----
+    # ---- 8) 本地缺失的模型要标出来且不可选（桌面端选择器）----
     state = make_state("miku_v5", "miku_v5")
     state["missing_models"] = ["miku"]
     dlg.apply_console_state(state)
-    check("缺失的模型按钮被禁用", not dlg.picker_phone._buttons["miku"].isEnabled())
+    check("缺失的模型按钮被禁用", not dlg.picker_desktop._buttons["miku"].isEnabled())
     check("缺失的模型有文字提示",
-          "没有这个模型" in dlg.picker_phone._buttons["miku"].text(),
-          dlg.picker_phone._buttons["miku"].text())
+          "没有这个模型" in dlg.picker_desktop._buttons["miku"].text(),
+          dlg.picker_desktop._buttons["miku"].text())
 
     dlg.close()
     app.quit()

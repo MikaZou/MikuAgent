@@ -129,7 +129,6 @@ class SettingsDialog(QDialog):
     reconfigure_requested = Signal()
     # 换模型 / 完全退出（由 main.py 接线到实际的加载与退出逻辑）
     desktop_model_changed = Signal(str)
-    phone_model_changed = Signal(str)
     watermark_changed = Signal(bool)
     pet_visibility_requested = Signal(bool)
     quit_requested = Signal()
@@ -185,20 +184,16 @@ class SettingsDialog(QDialog):
         self._key_row_key = self._rows["model"]
 
         # ---------------- 模型 ----------------
+        # 只留桌面端。**手机端用哪个模型由手机自己定** —— 换模型是手机上
+        # 顺手就做的事，跑到电脑上来改反而绕；PC 这边只负责把所有模型都按 id
+        # 提供出去（见 backend/remote_server.py 的 /model/<id>/...），
+        # 以及把手机报上来的选择记一笔（data/model_prefs.json 的 phone）。
         self.picker_desktop = ModelPicker(
             "桌面端模型",
             "换完立刻重建 Live2D 渲染器；两个模型的美术范围差很多，取景会自动重新拟合。",
         )
         self.picker_desktop.changed.connect(self.desktop_model_changed.emit)
         root.addWidget(self.picker_desktop)
-
-        self.picker_phone = ModelPicker(
-            "手机端模型",
-            "手机用哪个模型由 PC 决定：改完立刻推送给已连接的手机，"
-            "手机会重新同步该模型并刷新画面。",
-        )
-        self.picker_phone.changed.connect(self.phone_model_changed.emit)
-        root.addWidget(self.picker_phone)
 
         # ---------------- 开关 ----------------
         self._tts_check = QCheckBox("启用语音输出（Miku 说话）")
@@ -338,7 +333,6 @@ class SettingsDialog(QDialog):
 
             unavailable = set(state.get("missing_models") or [])
             self.picker_desktop.set_state(state.get("desktop_model", ""), unavailable)
-            self.picker_phone.set_state(state.get("phone_model", ""), unavailable)
 
             wm_param = state.get("watermark_param")
             self._watermark_check.setEnabled(bool(wm_param))

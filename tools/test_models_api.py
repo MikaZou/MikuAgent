@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import time
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -112,27 +113,39 @@ async def run() -> int:
     body = await resp.json()
     check("GET /health", resp.status == 200 and body.get("ok") is True)
 
-    # ---- 8) WebSocket：ready 带模型，set_model 改选择并广播 ----
+    # ---- 8) WebSocket：ready 带模型清单；set_model 只**记录**手机的选择 ----
+    #
+    # 手机端是「自己用哪个模型」的主人：换模型由手机自己切（本地改 + 重同步），
+    # 发 set_model 只是把选择告诉 PC 记一笔，**PC 不再广播回去** ——
+    # 广播会把这台手机的选择强加到别的手机上。
     original = models_catalog.selected("phone")
     ws = await client.ws_connect("/ws")
     hello = await ws.receive_json()
-    check("WS ready 带 phone_model 与 models",
-          hello.get("type") == "ready" and "phone_model" in hello and bool(hello.get("models")),
-          f"phone_model={hello.get('phone_model')}")
+    check("WS ready 带 models 清单",
+          hello.get("type") == "ready" and bool(hello.get("models")),
+          f"phone_model={hello.get('phone_model')} models={len(hello.get('models') or [])}")
 
     target = "miku" if hello.get("phone_model") != "miku" else "miku_v5"
     await ws.send_json({"type": "set_model", "id": target})
-    pushed = await ws.receive_json()
-    check("set_model 后收到 config 广播",
-          pushed.get("type") == "config" and pushed.get("phone_model") == target,
-          json.dumps(pushed, ensure_ascii=False))
-    check("set_model 真的写进了选择", models_catalog.selected("phone") == target,
-          models_catalog.selected("phone"))
+    # set_model 没有回音，所以只能轮询等服务端处理完 —— 直接断言会撞上竞态
+    # （之前那条 await receive_json() 顺手充当了同步点，去掉之后就露出来了）。
+    deadline = time.time() + 3.0
+    while time.time() < deadline and models_catalog.selected("phone") != target:
+        await asyncio.sleep(0.05)
+    check("set_model 写进了 PC 的记录", models_catalog.selected("phone") == target,
+          f"期望 {target}，实得 {models_catalog.selected('phone')}")
     resp = await client.get("/model/manifest")
-    check("老写法 manifest 也跟着变", (await resp.json()).get("id") == target)
+    check("老写法 manifest 跟着记录走", (await resp.json()).get("id") == target)
+
+    # 不该收到任何回音：给它 1.5 秒，只要收到东西就是多广播了
+    try:
+        extra = await asyncio.wait_for(ws.receive_json(), timeout=1.5)
+        check("set_model 不广播回音", False, json.dumps(extra, ensure_ascii=False))
+    except asyncio.TimeoutError:
+        check("set_model 不广播回音", True, "1.5s 内没有多余消息")
 
     await ws.send_json({"type": "set_model", "id": "不存在的模型"})
-    err = await ws.receive_json()
+    err = await asyncio.wait_for(ws.receive_json(), timeout=3.0)
     check("未知模型 set_model 被拒", err.get("type") == "error", json.dumps(err, ensure_ascii=False))
     await ws.close()
 

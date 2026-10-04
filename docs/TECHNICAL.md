@@ -2075,23 +2075,54 @@ ui/live2d_view.py     EMOTION_MOTION / EMOTION_EXPRESSION                      #
 **不进 `.env`**：它是运行期状态，不是部署配置；而且手机端那个是在设置窗口里点的，
 写 `.env` 会让人以为要重启。
 
-#### 5.11.2 手机端怎么知道用哪个模型
+#### 5.11.2 手机端用哪个模型：**手机说了算**
 
-**PC 是唯一权威**，因为设置窗口要显示「手机端现在用哪个」——
-两边各切各的必然出现「手机上是新模型、窗口里写着经典模型」。
+一开始的设计是「PC 是唯一权威」：手机点一下 → 请求 PC → PC 写选择并广播 → 手机跟着切。
+后来按需求改成**手机自己就是主人**，PC 设置窗口里那个「手机端模型」也一并去掉了：
 
 ```
-PC 设置窗口勾选「手机端模型」
-   └─ models_catalog.select("phone", id)  →  写 data/model_prefs.json
-   └─ RemoteController.set_phone_model(id) → 广播 {"type":"config","phone_model":id}
-        └─ 手机 RemoteClient 收到 config → SwitchModel → 重新同步 <id> 的清单 → 重载页面
-
-手机状态栏的「模型 xx」按钮（用户点了）
-   └─ native.setModel(id) → {"type":"set_model","id":…}
-        └─ PC 校验 id → 写选择 → 广播 config 给**所有**客户端（含点它的那台）
+手机设置面板点「初音ミク · 新模型」
+   └─ MainActivity.onSetModel → switchModel(id)     ← 本地立刻切
+         ├─ prefs[model_id] = id
+         ├─ ModelSync 按 <id> 同步（GET /model/<id>/manifest）
+         └─ 重载页面 → 新模型渲染出来
+   └─ remote.sendSetModel(id)                       ← 顺手告诉 PC 记一笔
+         └─ PC：models_catalog.select("phone", id)，**不广播**
 ```
 
-手机上**不本地直接切**：只发请求，等 PC 广播回来才真换。这样三处显示永远一致。
+为什么不再让 PC 说了算：
+
+* 换模型是**手机上顺手就做**的事，跑到电脑上改反而绕；
+* PC 的 `phone_model` 曾经在每次连上时覆盖本机选择 —— 用户在手机上选完，
+  下次连接又被重置回去（改成本地优先后这个坑自然消失）；
+* 广播 `config` 会把 A 手机的选择强加到 B 手机上（多用几台就会打架）。
+
+PC 侧记那一笔只为了两件事：`data/model_prefs.json` 里留个记录（设置窗口的
+状态行显示「手机自己选的」），以及老写法的 `/model/manifest`（不带 id）
+知道该给哪个模型。**PC 只负责把所有模型按 id 提供出去**，不再决定用哪个。
+
+> 兼容：旧版 APK 会读 `ready.phone_model` 并跟着切；旧版 PC 会广播 `config`。
+> 新手机收到 `config` 只记一条日志、**不跟着改**（见 `RemoteClient.Event.Config`），
+> 所以新旧混用时以手机为准。
+
+#### 5.11.2.1 手机端的设置面板
+
+手机自己的设置都在页面的 `#settings` 里（右上角 ⚙ 打开）：
+
+| 分区 | 内容 |
+| --- | --- |
+| Live2D 模型 | 单选项（名字 + 说明），点一下本地切换。**取代**原来状态栏上那个「点一下往后轮」的按钮 —— 那个看不到有哪些模型、也回不到上一个 |
+| 连接 PC | 地址 + 端口 + 「重新连接」。以前端口是写死的、地址只在首次运行时能填，连上之后就再也改不了 |
+| 开关 | 显示模型水印 / 视频对话（与状态栏的水印按钮、输入栏的 📹 是同一个开关的两处入口） |
+| 状态 | 连接、PC 地址、当前模型、模型数量、贴图倍率、Cubism Core 版本、屏幕 |
+
+页面拿不到 PC 地址/端口/贴图倍率（那些只在 SharedPreferences 与 AssetServer 里），
+所以由原生 `Bridge.deviceState()` 打包成 JSON 给它。
+
+**踩到的坑**：设置面板里点「重新连接」到**同一个地址**时，`RemoteClient.connect()`
+会走 `if (url == currentUrl && socket != null) return` 直接返回，而页面已经乐观地
+显示成「连接中…」—— 没有任何后续状态事件把它改回来，界面就永远卡在「连接中…」。
+修法：那条分支补发一次真实的 `Status(CONNECTED)`。
 
 #### 5.11.3 路由：同一份目录按 id 暴露，并兼容旧写法
 
@@ -2256,9 +2287,10 @@ doneCurrent()
 | 多模型路由 / 广播 / 穿越防护 | `tools/test_models_api.py` | 29/29 通过 |
 | 设置窗口不该乱发换模型信号 | `tools/test_settings_dialog.py` | 13/13 通过 |
 | 桌面端换模型（真 UI） | UI Automation 点单选框 | 日志 `切换模型：miku_v5 → miku`、prefs 落盘 |
+| 手机端换模型（真机） | 手机上打开设置面板点「经典」 | 日志 `切换模型 miku_v5 -> miku（手机设置）`、PC 记录 `phone`、手机重新同步并渲染 |
+| PC 设置里没有手机端模型 | `tools/test_settings_dialog.py` | 断言 `not hasattr(dlg, "picker_phone")`，防止它被加回来 |
 | **完全退出（真按钮）** | `tools/test_quit_by_uia.ps1` 点设置窗口的「完全退出」+ 确认框 | 进程树全退、8765/18520 释放 |
 | 手机端渲染两个模型 | 真机截图 + `tools/phone_cdp.py` 读页面变量 | 都完整落在安全带内 |
-| 手机端换模型 | 真机点状态栏「模型」按钮 | PC 日志 `请求切换模型 → miku`、phone 选择落盘、手机重载 |
 | 对话 / 转写 / 语音 | 真机发文字 + 长按说话 | `data/remote.log` 三类记录齐全 |
 
 #### 5.11.9 联调时踩到的环境问题
@@ -2372,6 +2404,8 @@ doneCurrent()
 | **取景探针把中间帧画到屏幕上** | 屏幕上出现两个错位的 Miku，而 `grabFramebuffer()` 是干净的 | `auto_frame()` 要连画十几帧，直接画进了控件自己的 FBO，被合成了出去 | 探针改用私有离屏 FBO，画完还回 `defaultFramebufferObject()`（§5.11.4.1） |
 | **透明窗口的「多出来的东西」不一定是自己画的** | 截图里两个 Miku，一度当成重影 | 桌宠是逐像素透明的，窗口背后的图片/文字会原样透出来 | 用 `grabFramebuffer()` 对账；两者不一致时先怀疑背景（§5.11.4.1） |
 | **换模型后要等几秒才动** | 换过去之后模型先僵住 | `_next_idle_at` 留着上一个模型的间隔（最多 7 秒） | `load_model()` 里一并重置 `_next_idle_at = 0`（§5.11.4） |
+| **手机点「重新连接」后一直卡在「连接中…」** | 地址没变时点重连，状态永远不回到「已连接」 | `RemoteClient.connect()` 对「同一地址且已连着」直接 return，而页面已经乐观地显示「连接中…」 | 那条分支补发一次真实的 `Status(CONNECTED)`（§5.11.2.1） |
+| **换模型要连着 PC 才能换** | PC 不在时手机上换不了 | 原设计是「请求 PC → PC 广播 → 手机才切」 | 改成手机本地直接切，PC 只记录（§5.11.2） |
 | **顶点包围盒把模型算小一半** | 手机端经典模型缩到屏幕下半部分，取景框顶部 325px 一个像素都没有 | `getDrawableVertices()` 只给**几何**范围，不管那块几何有没有被画出来（实测空出 1600 多画布像素） | 两端统一改「画一帧 + `glReadPixels` 读 alpha 求包围盒」（§5.11.5） |
 | **补装的表情/动作「查不到」** | 8 个表情补装成功、`SetExpression` 也真的生效，但 `GetExpressionIds()` 返回 `[]` | 补装只进内部注册表，不进 getter 返回的列表；`GetMotions()` 还额外有一层 Python 缓存 | 自己记名字、取并集；补装前清 `_motions_cache`，或自己记动作数（§5.11.6） |
 | **刚加载的模型永远「在忙」** | 待机动作一个都不播，模型从头僵到尾 | `IsMotionFinished()` 在新模型上初始返回 `False`（动作管理器还没启动过） | 判据加一条 `_played_any`：本模型还没播过动作时不要相信它（§5.11.5） |

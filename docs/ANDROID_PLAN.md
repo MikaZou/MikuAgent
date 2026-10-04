@@ -386,14 +386,19 @@ PC 侧 Python 改动（`REMOTE_MODEL_DIR` + `/model/manifest`）随 Phase 2 一�
 | 单一 `REMOTE_MODEL_DIR` → 模型清单 | `GET /model/list`、`GET /model/<id>/manifest`、`GET /model/<tail:.*>` |
 | 新增 `profile` 随清单下发 | 情绪→表情/倾角、水印参数由 PC 定义，手机端直接用，两端行为不可能不一致 |
 | 手机端缓存目录 | `files/miku_v5/` → `files/models/<id>/`（旧目录启动时自动清理） |
-| 手机端换模型 | 状态栏「模型 xx」按钮只发 `{"type":"set_model"}`，等 PC 广播 `config` 才真换（PC 是唯一权威） |
+| 手机端换模型 | **手机设置面板**里选，本地直接切 + 重新同步 + 重载；PC 只记录，不再有「手机端模型」设置项 |
 | 取景 | 两端统一改为「画一帧 + 读 alpha 实测」；旧的顶点法在经典模型上会把模型算小一半 |
 | 页面入口 | 固定用 `/model/_active.model3.json` 与 `/model/__profile.json`，换模型时页面源码不用改 |
+| 手机设置面板 | 新增：换模型 / 改 PC 地址与端口 / 水印 / 视频对话 / 运行状态 |
+
+「谁决定手机用哪个模型」换过一次：最初是 PC 唯一权威（手机请求 → PC 广播 → 手机切），
+后来按需求改成**手机自己就是主人**（本地切，PC 只记一笔）。理由与实现见
+`docs/TECHNICAL.md` §5.11.2。旧版 PC 广播的 `config` 新手机只记日志、不跟着改。
 
 旧 APK / 旧 `web/phone.html` 不受影响：`/model/manifest`（不带 id）与
 `/model/<相对路径>`（第一段不是已知 id）都保留为兼容写法。
 
-验收（真机，iQOO V2452A）：两个模型都能完整渲染并落在安全带内；手机上点
-「模型」按钮 → PC 日志 `请求切换模型 → miku`、`data/model_prefs.json` 落盘、
-手机重载并切到经典模型；文字对话与长按说话都在 `data/remote.log` 留下
-对话 / 转写 / 语音记录。详见 `docs/TECHNICAL.md` §5.11。
+验收（真机，iQOO V2452A）：两个模型都能完整渲染并落在安全带内；在手机设置面板里
+点「经典」→ 日志 `切换模型 miku_v5 -> miku（手机设置）`、`data/model_prefs.json`
+的 `phone` 落盘、手机重载并切到经典模型；文字对话与长按说话都在 `data/remote.log`
+留下 对话 / 转写 / 语音记录。详见 `docs/TECHNICAL.md` §5.11。

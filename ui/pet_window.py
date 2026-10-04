@@ -918,6 +918,8 @@ class PetWindow(Live2DView):
         """给控制台组装一份「现在是什么状态」。"""
         info = self.model_info or {}
         missing = [m["id"] for m in models_catalog.available() if not m["present"]]
+        # 手机端用哪个模型是**手机自己**在设置里选的，PC 只把它报上来的值记一笔。
+        # 所以这里显示的是「手机现在用的」，而不是「PC 决定了什么」。
         phone_pref = models_catalog.selected("phone")
         urls = list(self._remote_urls or [])
         return {
@@ -934,7 +936,8 @@ class PetWindow(Live2DView):
                 f"{len(info.get('motion_groups') or {})} 动作组)"
             ),
             "phone_text": (
-                f"{models_catalog.resolve(phone_pref)['name']}　"
+                (f"当前用「{models_catalog.resolve(phone_pref)['name']}」（手机自己选的）　"
+                 if phone_pref else "")
                 + ("已开启：" + "  ".join(urls) if urls else "未开启（去设置里打开）")
             ),
             "voice_text": (
