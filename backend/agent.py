@@ -20,6 +20,14 @@ KNOWN_EMOTIONS = (
 INLINE_EMOTION_TAG = re.compile(
     r"\[\s*(" + "|".join(KNOWN_EMOTIONS) + r")\s*\]", re.IGNORECASE
 )
+# 模型偶尔**不带方括号**就把标签写在开头（实测：「HAPPY 收到收到～…」）。
+# 那时前面两条规则都不命中，结果 "HAPPY" 留在正文里 —— 气泡里显示出来、
+# TTS 还会照着念。所以补一条裸标签规则。
+#
+# 只认全大写（与 KNOWN_EMOTIONS 完全一致）并且**后面必须跟空白**：
+# 这样正文里出现 "HAPPY" 这个词（比如解释自己在开心）不会被误吞，
+# 而 "HAPPYS" 这种更长单词也不会被切坏。
+BARE_EMOTION_TAG = re.compile(r"^\s*(" + "|".join(KNOWN_EMOTIONS) + r")\s+")
 
 WRITE_MEMORY_TOOL = {
     "type": "function",
@@ -98,9 +106,14 @@ ERROR_REPLIES = [
 def parse_emotion(text: str) -> tuple[str, str]:
     """从回复中解析情感标签，返回 (情感, 去除标签后的正文)。
 
-    标签可能出现两次：开头（约定的格式）和正文中间（模型自由发挥）。
-    两处都必须清掉 —— 只处理开头的话，中间那个会原样显示在气泡里，
-    还会被 TTS 念出来（「左括号 HAPPY 右括号」）。
+    标签可能出现三次，都必须清掉：
+
+    1. 开头带方括号（约定的格式）
+    2. 开头**不带方括号**（模型偶尔自由发挥，实测写过「HAPPY 收到收到～…」）
+    3. 正文中间（实测模型写过「…吗～？ [HAPPY] 当然可以呀！」）
+
+    只处理开头或只处理带括号的，标签都会原样显示在气泡里、还会被 TTS 念出来
+    （「左括号 HAPPY 右括号」）。
     """
     raw = text or ""
 
@@ -110,7 +123,14 @@ def parse_emotion(text: str) -> tuple[str, str]:
         emotion = match.group(1).upper()
         raw = raw[match.end():]
 
-    # 开头没有的话，就用正文里第一个标签当情感
+    # 开头没有方括号的裸标签
+    if not emotion:
+        bare = BARE_EMOTION_TAG.match(raw)
+        if bare:
+            emotion = bare.group(1)
+            raw = raw[bare.end():]
+
+    # 开头都没有的话，就用正文里第一个标签当情感
     if not emotion:
         found = INLINE_EMOTION_TAG.search(raw)
         if found:

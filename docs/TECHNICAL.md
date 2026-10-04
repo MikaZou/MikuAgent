@@ -2316,6 +2316,167 @@ doneCurrent()
 
 ---
 
+### 5.12 手机端独立后端与双端记忆同步（**已完成，真机 + 关掉 PC 验证**）
+
+需求原话：「让手机端也具备电脑端的后端功能，同时保留连接 PC 的选项。模型默认采用
+api 调用的模型，记忆库未连接 PC 时本地保存，连接 PC 后进行双端同步，这样手机端就
+可以不需要 PC 端启动以及在同一局域网内进行独立使用」。
+
+一句话结果：手机自己能聊、能说、能听、能记；PC 变成**可选**的同步对象。
+
+#### 5.12.1 哪些 PC 能力搬得动，哪些搬不动
+
+| PC 后端 | 实现 | 结论 |
+| --- | --- | --- |
+| DeepSeek 对话 + `write_memory` 工具 + 情感标签 | `agent.py` | ✅ 换 OkHttp 直连 `/chat/completions` |
+| 人设提示词 | `persona.py` | ✅ 抽成 `shared/persona.txt`，两端读同一个文件（§5.12.2） |
+| 记忆库 | `memory.py`（SQLite） | ✅ Android 自带 SQLite，表结构同构（§5.12.4） |
+| TTS · MiniMax 云端 | `tts.py` | ✅ HTTPS POST，克隆音色也能用 |
+| TTS · 本地 GPT-SoVITS | 独立进程 + CUDA | ❌ 需要显卡 |
+| TTS · edge（微软在线） | `edge-tts` 库 | ⚠️ 无 Android SDK，不移植；没配 MiniMax Key 时退到**系统 TTS** |
+| STT · MiniMax ASR | `stt.py` | ✅ multipart 表单 |
+| STT · 本地 Whisper | faster-whisper | ❌ 手机上不现实 |
+
+手机端新增约 1500 行 Kotlin：`brain/{Agent,Persona,Tts,TtsText,SystemTts,Stt,Codec,Brain,SecretStore,BrainConfig}`
+与 `memory/{MemoryStore,SyncClient,MergeRules,SyncModels}`。
+
+#### 5.12.2 人设文案只能有一份
+
+`shared/persona.txt` 是唯一的文案来源：PC 的 `persona.py` 与手机的 `Persona.kt`
+读**同一个文件**（Gradle 把仓库根的 `shared/` 直接挂成 APK 的 assets）。
+
+模板语法只有两条规则，两端实现完全一致：
+
+```
+{{#名字}} … {{/名字}}   可选区块；关闭时整段（含标记）删掉
+{占位符}                必填值，直接替换
+```
+
+区块标记写在**行内**，所以换行数完全由模板文本决定，渲染器不对空行做任何修补 ——
+这一点是刻意的：原实现是 `"\n".join(parts)`，不同组合下空行数并不一致
+（有长期记忆时记忆正文后面跟着**三个**换行）。把换行写进模板才能做到逐字不变。
+
+验证是**跨语言逐字比对**，不是「看起来差不多」：
+`tools/test_persona_parity.py` 用 32 个组合（昵称 × 记忆 × 图片 × 平台 × 备注）
+把结果钉在 `tools/persona_golden.json`（含模板 sha1），`PersonaTest.kt` 读**同一份**
+golden 比对。这套东西真的抓到过一个手打错字（「你看到我吗」≠ 原文「你看得到吗」）。
+
+同样的手法用在 TTS 前的文本清洗上：`normalize_text` 有 8 道正则、`split_sentences`
+有切分+合并两段逻辑，移植错了**不会报错**，只会「念出来怪怪的」甚至整句静音
+（清洗后没有可用字符），所以 `tools/test_tts_text.py` + `TtsTextTest.kt`
+对着同一份 golden 跑 18+11+7 条用例。
+
+#### 5.12.3 对话通道：一个开关，两条路
+
+```
+设置：对话大脑 = api（默认）   手机直连 api.deepseek.com / api.minimaxi.com，记忆写本机 SQLite
+             = pc            走原来的 WebSocket（RemoteClient 一个字没改）
+             = auto          有 Key 就直连；没 Key 但配过 PC 就走 PC
+```
+
+`auto` 的默认落点是刻意的：从旧版本升上来的用户配了 PC、还没填 Key，
+不该一开 App 就看到演示模式以为坏了。
+
+两条路走**同一个回调式接口** `Brain.send(sessionId, text, image, onResult)` ——
+之所以是回调而不是 `suspend` 返回值：PC 那条路是 WebSocket 异步的，发出去就结束了，
+结果要等 `Event.Reply` 回来。统一形状之后，页面、口型、动作逻辑完全不用知道
+下面跑的是哪一端。
+
+**不连 WebSocket 的分支**：独立模式（api）下手机与 PC 的往来只剩 HTTP
+（`/model/*` 模型、`/sync/*` 记忆、`/model/active` 报告选择）。省电，也没有僵尸重连。
+
+#### 5.12.4 双端记忆同步
+
+四张表（sessions / messages / memory_items / meta）两端**同构**，只多四个同步列：
+
+| 列 | 作用 |
+| --- | --- |
+| `uuid` | 全局身份。两端各自 AUTOINCREMENT 的 id 没法当身份用 |
+| `updated_at` | epoch 秒。LWW 的新旧判定 + 同步游标 |
+| `deleted` | **墓碑**。删除必须能传播，否则两端会互相「复活」 |
+| `origin` | `'pc'` / `'phone'`，只做溯源 |
+
+**同步单位是「天」**，不是会话：两端本来就都是「一天一条会话」，
+所以按 `substr(created_at,1,10)` 归并就行，**完全不需要做会话 id ↔ uuid 的映射**。
+
+```
+GET  /sync/state                探活 + 计数
+GET  /sync/changes?since=<ts>   增量，按天打包；返回的 now 是**服务端时钟**
+POST /sync/changes              收下手机送来的变动
+```
+
+PC 侧**不存游标**：手机是发起方（它才知道自己什么时候能连上），
+两个游标都存在手机上。少一份状态就少一类「两端游标不一致」的故障。
+
+手机侧 `SyncClient`：**先拉后推**（拉完本地就有对方的最新版本，推的时候不会把自己的
+旧版本推回去）。三个容易写错的点：
+
+* **拉取游标用服务端返回的 `now`，不是本机时钟** —— 手机慢几秒就会漏行。
+* **推送只带 `origin='phone'` 的行**。从 PC 同步过来的行 origin 是 `pc`，
+  推回去纯属回声；尤其当 PC 的时钟更快时，那些行的 `updated_at` 永远大于手机的
+  `pushWatermark`，会**每次同步都重发一遍**。
+* **只有真正拉空才把游标推进到服务端时间**。中途停下（轮数上限/游标不前进）
+  必须留在原地，否则剩下的变动会被永久跳过 —— 这是「回退 300 秒重扫」也救不回来的错误。
+
+两个游标都回退 **300 秒**重扫：手机与电脑没对时，严格用「上次同步时对方的时间」
+当游标会让时钟慢的那台刚写下的行被永久跳过。多扫一点没代价，因为
+`decide()` 是幂等的（时间戳**相等时保留本地**）。
+
+合并规则写在 `shared/sync_rules.json`，两端各实现一份、各自的测试读同一份契约
+（`tools/test_sync_rules.py` / `MergeRulesTest.kt`）。为什么值得为几条规则搭这套：
+规则两端不一致时，**两边各自都「对」**，只是一个覆盖了另一个，表现是
+「某台设备上的记录悄悄变了」，往往几天后才发现。
+
+#### 5.12.5 迁移：用户真实库上必须一次通过
+
+`memory.py::_migrate()` 幂等补列 + 回填，每次启动跑一遍。两个坑：
+
+* **唯一索引必须在回填之后建**：老库里 `uuid` 是 NULL，先建索引会让所有行撞唯一约束。
+* 历史行的 `updated_at` 用 `strftime('%s', created_at)` 回填 —— SQLite 把本地时间字符串
+  当 **UTC** 解析，算出来比真实时间早几个小时（东八区）。对**追加型**的消息无害
+  （只用于 LWW 与游标），但意味着**首次同步必须从 0 开始拉**，不能假设
+  「只有比现在新的才要」。
+
+真实库动手前先在**副本**上验证过（26 会话 / 270 消息 / 4 记忆全部保留并回填），
+并且备份了原件。
+
+#### 5.12.6 验证（全部真机实测）
+
+| # | 场景 | 结果 |
+| --- | --- | --- |
+| 1 | **PC 关机、无 adb reverse** | 模型正常渲染、设置面板列得出两套模型、换模型成功、发一句话收到真实回复 + MiniMax 语音 |
+| 2 | 手机 PC 都开（旧行为） | 「对话大脑=只用 PC」下行为与改造前一致 |
+| 3 | 手机先离线聊 → 连 PC | PC 库里出现手机来源的消息（实测 16 条） |
+| 4 | PC 先聊 → 手机连上 | 手机拉到 275 条（270 消息 + 4 记忆 + 1 meta），新建 5 天会话 |
+| 5 | 两端同一天都聊过 | 两端各 286 条消息、零重复 uuid、当天只有一条会话 |
+| 6 | 长期记忆双向 | 手机写的「小邹最喜欢吃葱」到了 PC；PC 的 4 条也到了手机 |
+| 7 | 重复同步幂等 | 连续两次同步行数与内容不变（`tools/test_sync_e2e.py`） |
+
+顺带一个观察：用户库里 2026-09-11 / 13 / 14 各有 5~11 条**改动前就存在的同日
+会话碎片**。方案是「不合并也不删除用户数据」，所以保留原样；测试里断言的是
+「同步不会让它变多」。
+
+#### 5.12.7 这一轮踩到的坑（都是「关掉 PC」这条路走一遍才暴露的）
+
+| 坑 | 表现 | 原因 | 修法 |
+| --- | --- | --- | --- |
+| **独立模式下模型根本不加载** | 页面一直空白，`modelReady=false` | 模型同步挂在 `startConnecting` 里，独立模式不连 WS 就不调它 | 模型同步与对话通道**解耦**：独立模式只同步模型、不连 WS |
+| **模型同步失败没有退路** | PC 一关就渲染不出来 | `ModelSync.sync` 只在「取清单失败」时用缓存，下载/校验失败仍然整块失败 | 新增 `useCacheOnly()`，失败后一律退到本地缓存 |
+| **两把单飞锁混成一把** | 启动时模型迟迟不加载 | `syncModel` 与 `runSync` 本该各一把锁，重构时被全局改名成同一个 | 分开：`syncing`（下贴图）/ `memorySyncing`（同步记录） |
+| **模型清单只在 WS 下发** | 面板说「还没收到模型清单」，明明缓存着两套模型 | 清单原本只在 `ready` 里给 | 清单本来就是 HTTP 资源：调 `GET /model/list`，收到就落地，离线时用本地缓存重算 `present` |
+| **状态栏伪造「已连接」** | `connected=false` 但状态栏写「已连接」 | `runSync` 里写了 `onStatus(lastStatus?.first ?: "connected", …)`，独立模式下 `lastStatus` 是空的 | 删掉那行（面板打开时自己会重新读 `deviceState()`） |
+| `parseEmotion` 的返回值顺序被静默写反 | 气泡显示的是 `HAPPY` 当正文，TTS 念的是「HAPPY」 | 它返回 `(情感, 正文)`，调用方按 `(正文, 情感)` 解构 —— 两个 String 的 `Pair`，编译器一句话都不会说 | **别再用 `Pair<String, String>`**：改具名的 `Agent.Parsed(reply, emotion)`，物理上写不反 |
+| `MasterKey` 在 `security-crypto:1.0.0` 里不存在 | 编译期 `Unresolved reference` | `MasterKey.Builder` 是 1.1.0-alpha 才加的 | 用 1.0.0 的字符串别名重载（行为一样，不值得为它引 alpha） |
+| Android 没有 `executescript` / `query(sql,args)` | 编译期报错 | 那是 Python sqlite3 和别的 API | 逐条 `execSQL`；读原始 SQL 用 `rawQuery` |
+| `@Volatile` 不能用于局部变量 | 编译期报错 | 它只能修饰属性 | 用 `AtomicBoolean` |
+
+发现 `parseEmotion` 那个 bug 的方式值得记一笔：MIUI 的 logcat 时有时无，
+所以我给 `deviceState()` 加了一段 `tts`（最近一次合成的字数/格式/计费）。
+看到 `计费 5 字` 而那一轮回复有 24 个字，才意识到送进 TTS 的其实是 `"HAPPY"`。
+**把关键中间量暴露成一个确定性的读数，比反复翻日志有效得多。**
+
+---
+
 ## 6. 附录
 
 ### 6.1 工具清单
@@ -2323,6 +2484,13 @@ doneCurrent()
 | 工具 | 用途 |
 | --- | --- |
 | `tools/measure_framing.py` | 复述自动取景实际算出的 scale/offset，并检查是否溢出安全区（300 行→改为实测） |
+| `tools/test_persona_parity.py` | 人设提示词跨语言逐字比对（PC 侧；手机侧是 `PersonaTest.kt`） |
+| `tools/test_tts_text.py` | TTS 前的文本清洗/分句/语速补偿跨语言比对（18+11+7 条） |
+| `tools/test_sync_rules.py` | 合并规则与 `shared/sync_rules.json` 契约一致 |
+| `tools/test_sync_merge.py` | PC 侧 `/sync/*` 端点与合并行为（临时库，含幂等/LWW/墓碑） |
+| `tools/test_sync_e2e.py` | **真机**双端同步验收（幂等、按天归并、记忆双向） |
+| `tools/phone_push_config.py` | 把 `.env` 的 API 配置推给手机（Key 不进命令行、不进输出） |
+| `tools/inspect_memory.py` | 只读看一眼记忆库现状（排查/对比迁移前后） |
 | `tools/probe_models.py` | 在真 GL 上下文里量两个模型的画布/美术范围/scale 与 offset 单位（取景算法的依据） |
 | `tools/test_desktop_models.py` | 桌面端回归：两个模型都渲染得出来、能互换、取景落位、画像引用齐全、待机真会动 |
 | `tools/test_models_api.py` | 远程服务多模型路由回归：清单 / manifest / 文件 / 目录穿越 / 广播 / 旧写法 |
@@ -2376,6 +2544,7 @@ doneCurrent()
 | **托盘僵尸进程** | Alt+F4 后进程不退 | `setQuitOnLastWindowClosed(False)` | `closeEvent` 里显式 `quit()` |
 | **窗口尺寸无效** | 改了 `config.py` 窗口还是旧尺寸 | `.env` 覆盖了默认值 | 同步改 `.env` |
 | **内存耗尽** | NVIDIA 驱动失联、系统降级 | 测量脚本在单进程内连跑 4 个模型配置 | 加内存守卫、一次一个配置 |
+| **对已解析的数据重新「修复」= 破坏性** | 一个「修复历史脏数据」的脚本把 95 行的 emotion 全改成了 NORMAL | 它把 \parse_emotion\ 又跑在**已经解析过**的正文上 —— 正文里早就没有标签了，于是「找不到标签 → NORMAL」 | 修复脚本只能依据**原始输入**判断。教训：先想清楚「这个字段现在处于什么状态」，再决定能不能再跑一遍解析。已从备份 + 当时打印的排查输出逐条恢复，并做了「与备份 0 差异」的复核 |
 
 **Android / 远程服务（本轮新增，按代价排序）**
 

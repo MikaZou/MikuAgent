@@ -214,35 +214,6 @@ class Agent(
 
     // ---------------------------------------------------- 情感标签与兜底
 
-    /**
-     * 从回复里解析情感标签，返回「正文 + 情感」。
-     *
-     * 标签可能出现两次：开头（约定的格式）和正文中间（模型自由发挥）。
-     * 两处都必须清掉 —— 只处理开头的话，中间那个会原样显示在气泡里，
-     * 还会被 TTS 念出来（「左括号 HAPPY 右括号」）。PC 侧踩过这个坑。
-     */
-    fun parseEmotion(text: String): Parsed {
-        var raw = text
-        var emotion = ""
-
-        val head = EMOTION_TAG.find(raw)
-        if (head != null && head.range.first == 0) {
-            emotion = head.groupValues[1].uppercase()
-            raw = raw.substring(head.range.last + 1)
-        }
-        // 开头没有的话，就用正文里第一个标签当情感
-        if (emotion.isEmpty()) {
-            INLINE_TAG.find(raw)?.let { emotion = it.groupValues[1].uppercase() }
-        }
-        // 无论开头有没有，正文里的都清掉
-        raw = INLINE_TAG.replace(raw, " ")
-
-        // 清理标签留下的多余空白（保留换行：气泡里分段是有意义的）
-        var clean = MULTI_SPACE.replace(raw, " ")
-        clean = SPACE_BEFORE_NL.replace(clean, "\n")
-        clean = MULTI_NL.replace(clean, "\n\n")
-        return Parsed(reply = clean.trim(), emotion = emotion.ifEmpty { "NORMAL" })
-    }
 
     /** 离线演示回复：没配 Key 或调用失败时的兜底。文案与 PC **逐字一致**。 */
     fun mockReply(userMessage: String, error: Boolean = false): Parsed {
@@ -286,6 +257,51 @@ class Agent(
 
         private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
 
+        /**
+         * 从回复里解析情感标签，返回「正文 + 情感」。
+         *
+         * 标签可能出现三次，都必须清掉：
+         * 1. 开头带方括号（约定的格式）
+         * 2. 开头**不带方括号**（模型偶尔自由发挥，实测写过「HAPPY 收到收到～…」）
+         * 3. 正文中间（实测模型写过「…吗～？ [HAPPY] 当然可以呀！」）
+         *
+         * 只处理开头或只处理带括号的，标签都会原样显示在气泡里、还会被 TTS 念出来。
+         * PC 侧 `backend/agent.py::parse_emotion` 是同一套规则，两边由
+         * `tools/test_emotion_parse.py` + `EmotionParseTest.kt` 对着同一份 golden 钉住。
+         *
+         * 放在 companion 里是为了能在 JVM 单测里直接调（不依赖 Context）。
+         */
+        fun parseEmotion(text: String): Parsed {
+            var raw = text
+            var emotion = ""
+
+            val head = EMOTION_TAG.find(raw)
+            if (head != null && head.range.first == 0) {
+                emotion = head.groupValues[1].uppercase()
+                raw = raw.substring(head.range.last + 1)
+            }
+            // 开头没有方括号的裸标签
+            if (emotion.isEmpty()) {
+                val bare = BARE_EMOTION_TAG.find(raw)
+                if (bare != null && bare.range.first == 0) {
+                    emotion = bare.groupValues[1]
+                    raw = raw.substring(bare.range.last + 1)
+                }
+            }
+            // 开头都没有的话，就用正文里第一个标签当情感
+            if (emotion.isEmpty()) {
+                INLINE_TAG.find(raw)?.let { emotion = it.groupValues[1].uppercase() }
+            }
+            // 无论开头有没有，正文里的都清掉
+            raw = INLINE_TAG.replace(raw, " ")
+
+            // 清理标签留下的多余空白（保留换行：气泡里分段是有意义的）
+            var clean = MULTI_SPACE.replace(raw, " ")
+            clean = SPACE_BEFORE_NL.replace(clean, "\n")
+            clean = MULTI_NL.replace(clean, "\n\n")
+            return Parsed(reply = clean.trim(), emotion = emotion.ifEmpty { "NORMAL" })
+        }
+
         private val EMOTION_TAG = Regex("^\\s*\\[([A-Za-z_]+)\\]\\s*")
         private val KNOWN_EMOTIONS = listOf(
             "HAPPY", "SAD", "ANGRY", "SURPRISED", "MOTIVATED", "EMPATHY", "NORMAL",
@@ -294,6 +310,18 @@ class Agent(
             "\\[\\s*(" + KNOWN_EMOTIONS.joinToString("|") + ")\\s*\\]",
             RegexOption.IGNORE_CASE,
         )
+
+        /**
+         * 开头**不带方括号**的裸标签。
+         *
+         * 只认全大写（与 KNOWN_EMOTIONS 完全一致）并且**后面必须跟空白**：
+         * 这样正文里出现 "HAPPY" 这个词（比如在解释自己的心情）不会被误吞，
+         * "HAPPYS" 这种更长的单词也不会被切坏。
+         */
+        private val BARE_EMOTION_TAG = Regex(
+            "^\\s*(" + KNOWN_EMOTIONS.joinToString("|") + ")\\s+"
+        )
+
         private val MULTI_SPACE = Regex("[ \\t]{2,}")
         private val SPACE_BEFORE_NL = Regex("[ \\t]+\\n")
         private val MULTI_NL = Regex("\\n{3,}")

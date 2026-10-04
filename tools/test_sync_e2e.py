@@ -123,20 +123,30 @@ def main() -> int:
         return 2
     print(f"手机：{dev['memory']}  brain={dev['brainKind']}")
 
-    # ---- 8) 幂等：先测这个，免得后面被自己污染 ----
+    # ---- 8) 收敛 + 幂等 ----
+    # 注意顺序：先同步一次让两端收敛（手机离线期间聊的新消息会被推上来，
+    # 所以「行数不变」不是正确的断言 —— 正确的断言是**两端一致**），
+    # 然后再同步一次，这一次才必须一动不动。
     before_pc = pc_state()["counts"]
     before_phone = phone_state()["memory"]
+    print(f"     同步前：PC {before_pc['messages']} 条 / 手机 {before_phone['messages']} 条")
+
     st1 = phone_sync_now()
     mid_pc = pc_state()["counts"]
     mid_phone = phone_state()["memory"]
-    check("同步不会平白增加行数（第一次）",
-          mid_pc == before_pc and mid_phone == before_phone,
-          f"PC {before_pc} → {mid_pc} / 手机 {before_phone} → {mid_phone}")
+    check("同步后两端消息数收敛到同一个值",
+          mid_pc["messages"] == mid_phone["messages"],
+          f"PC {mid_pc['messages']} / 手机 {mid_phone['messages']}")
+    check("同步后两端长期记忆数一致",
+          mid_pc["memory_items"] == mid_phone["memories"],
+          f"PC {mid_pc['memory_items']} / 手机 {mid_phone['memories']}")
+    print(f"     第一次同步（{st1.get('text')}）后："
+          f"PC {mid_pc['messages']} / 手机 {mid_phone['messages']}")
 
     st2 = phone_sync_now()
     after_pc = pc_state()["counts"]
     after_phone = phone_state()["memory"]
-    check("重复同步幂等（第二次行数也不变）",
+    check("重复同步幂等（第二次行数与内容都不变）",
           after_pc == mid_pc and after_phone == mid_phone,
           f"PC {mid_pc} → {after_pc} / 手机 {mid_phone} → {after_phone}")
     check("同步没报错", not st2.get("lastError"), st2.get("lastError") or "(无)")
@@ -170,9 +180,9 @@ def main() -> int:
     check("手机端每天也只有一条会话（有消息的天数 = 手机的会话数）",
           before_phone["sessions"] == len(pc["by_day"]),
           f"手机 {before_phone['sessions']} 会话 / PC 有消息的天数 {len(pc['by_day'])}")
-    check("PC 消息里没有重复 uuid 造成的翻倍",
-          mid_pc["messages"] == pc["counts"]["messages"],
-          f"{pc['counts']['messages']} → {mid_pc['messages']}")
+    check("PC 与手机的消息条数一致（没有重复 uuid 造成的翻倍）",
+          after_pc["messages"] == after_phone["messages"],
+          f"PC {after_pc['messages']} / 手机 {after_phone['messages']}")
 
     # 两端的**今天**应该指向同一条会话、条数一致
     day = max(pc["by_day"].keys()) if pc["by_day"] else ""

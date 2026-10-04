@@ -1,0 +1,114 @@
+{
+ "cases": [
+  {
+   "input": "[HAPPY] 主人来啦！我等你好久了☆",
+   "emotion": "HAPPY",
+   "reply": "主人来啦！我等你好久了☆"
+  },
+  {
+   "input": "[NORMAL] 原来如此呀。",
+   "emotion": "NORMAL",
+   "reply": "原来如此呀。"
+  },
+  {
+   "input": "[sad] 小写也应该认出来",
+   "emotion": "SAD",
+   "reply": "小写也应该认出来"
+  },
+  {
+   "input": "[SURPRISED]哇没有空格",
+   "emotion": "SURPRISED",
+   "reply": "哇没有空格"
+  },
+  {
+   "input": "  [MOTIVATED]   前面有空白",
+   "emotion": "MOTIVATED",
+   "reply": "前面有空白"
+  },
+  {
+   "input": "HAPPY 收到收到～PC 这条路走得通だよ！☆",
+   "emotion": "HAPPY",
+   "reply": "收到收到～PC 这条路走得通だよ！☆"
+  },
+  {
+   "input": "SAD 主人不要难过嘛",
+   "emotion": "SAD",
+   "reply": "主人不要难过嘛"
+  },
+  {
+   "input": "NORMAL 嗯嗯，继续说。",
+   "emotion": "NORMAL",
+   "reply": "嗯嗯，继续说。"
+  },
+  {
+   "input": "…吗～？ [HAPPY] 当然可以呀！",
+   "emotion": "HAPPY",
+   "reply": "…吗～？ 当然可以呀！"
+  },
+  {
+   "input": "开头正常。中间又冒了一个 [ANGRY] 标签。",
+   "emotion": "ANGRY",
+   "reply": "开头正常。中间又冒了一个 标签。"
+  },
+  {
+   "input": "只有中间 [EMPATHY] 这一处标签",
+   "emotion": "EMPATHY",
+   "reply": "只有中间 这一处标签"
+  },
+  {
+   "input": "HAPPY 这个词出现在正文里但我只是在说自己的心情，开头没有标签",
+   "emotion": "HAPPY",
+   "reply": "这个词出现在正文里但我只是在说自己的心情，开头没有标签"
+  },
+  {
+   "input": "HAPPYS 这种更长的单词不该被切开",
+   "emotion": "NORMAL",
+   "reply": "HAPPYS 这种更长的单词不该被切开"
+  },
+  {
+   "input": "happy 小写的裸标签不认（只认全大写，避免误吞正文）",
+   "emotion": "NORMAL",
+   "reply": "happy 小写的裸标签不认（只认全大写，避免误吞正文）"
+  },
+  {
+   "input": "主人说 [1] 和 [2] 这种数字方括号不该被动",
+   "emotion": "NORMAL",
+   "reply": "主人说 [1] 和 [2] 这种数字方括号不该被动"
+  },
+  {
+   "input": "[UNKNOWN] 不认识的标签保留原样，不当情感",
+   "emotion": "UNKNOWN",
+   "reply": "不认识的标签保留原样，不当情感"
+  },
+  {
+   "input": "",
+   "emotion": "NORMAL",
+   "reply": ""
+  },
+  {
+   "input": "   ",
+   "emotion": "NORMAL",
+   "reply": ""
+  },
+  {
+   "input": "没有标签的普通回复。",
+   "emotion": "NORMAL",
+   "reply": "没有标签的普通回复。"
+  },
+  {
+   "input": "[HAPPY]",
+   "emotion": "HAPPY",
+   "reply": ""
+  },
+  {
+   "input": "[HAPPY]   ",
+   "emotion": "HAPPY",
+   "reply": ""
+  },
+  {
+   "input": "NORMAL ",
+   "emotion": "NORMAL",
+   "reply": ""
+  }
+ ]
+}

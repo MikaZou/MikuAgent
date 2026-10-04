@@ -1,8 +1,19 @@
-# MikuAgent Android 客户端（路线 A 手机端）
+# MikuAgent Android 客户端
 
-PC 上的桌宠当服务端，手机当瘦客户端：**手机只做渲染 + 采集 + 播放，AI 逻辑全在 PC**。
+**手机可以完全独立运行**（默认），也可以像以前那样把 PC 当服务端。
 
-完整设计见 [`docs/ANDROID_PLAN.md`](../docs/ANDROID_PLAN.md)，这里只讲怎么跑起来。
+```
+默认（对话大脑 = 只用手机）
+  手机 → api.deepseek.com（对话）  api.minimaxi.com（语音合成 / 识别）
+  手机 → 本机 SQLite（记忆）；连上 PC 时双向合并
+
+可选（对话大脑 = 只用 PC）
+  手机 → PC 的 WebSocket：聊天 / 语音 / 对话历史都跑在电脑上
+```
+
+两条路的渲染、录音、播放、口型**完全一样** —— 换的只是「谁提供大脑」。
+完整设计见 [`docs/ANDROID_PLAN.md`](../docs/ANDROID_PLAN.md) §15 与
+[`docs/TECHNICAL.md`](../docs/TECHNICAL.md) §5.12，这里只讲怎么跑起来。
 
 ---
 
@@ -25,7 +36,7 @@ PC 上的桌宠当服务端，手机当瘦客户端：**手机只做渲染 + 采
 ```
 WebView（只渲染，不碰网络）
    ↑ shouldInterceptRequest 喂本地文件
-Kotlin：WebSocket / 模型同步 / 录音 / 播放 / 口型包络 / 相机
+Kotlin：对话(本地或PC) / 模型同步 / 录音 / 播放 / 口型包络 / 相机 / 记忆同步
 ```
 
 - 页面来自 `https://appassets.androidplatform.net`（`WebViewAssetLoader` 的本地源）
@@ -80,6 +91,8 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 ## 首次使用
 
+### 想「独立运行」（默认用法，之后 PC 可以一直关着）
+
 1. **PC 端**：启动桌宠（`start.bat` 或 `python main.py`）。
    气泡里会显示手机该访问的地址，形如 `192.168.20.102`。
    也可以在 `data/remote.log` 里看。
@@ -87,6 +100,37 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
    - **安卓模拟器**填 `10.0.2.2`（模拟器访问宿主机的固定地址）
    - **真机**填 PC 的局域网 IP，且两者要在同一个 WiFi
 3. 首次连接会自动把模型同步到手机（约 35 MB）。
+4. **手机 ⚙ →「API 配置」**：把 PC 设置窗口「📋 复制 API 配置」得到的那段文本
+   粘进去，点「从粘贴内容导入」。Key 会存在手机的加密存储里。
+5. 完成。之后 **PC 可以一直关着**：手机自己聊天、说话、记事；
+   下次连上 PC 时两端的记录会自动双向合并。
+
+> 只想「AI 跑在电脑上」的话，第 4 步跳过，并在 ⚙ →「对话大脑」里选**只用 PC**。
+
+---
+
+## 独立运行是怎么工作的
+
+```
+对话   brain/Agent.kt      直连 api.deepseek.com（人设 + 历史 + write_memory 工具 + 情感标签）
+语音   brain/Tts.kt        直连 MiniMax /v1/t2a_v2（同一个克隆音色），拿回 WAV
+       brain/Stt.kt        直连 MiniMax /v1/speech_to_text
+       brain/SystemTts.kt  没配 MiniMax Key 时的兜底（系统音色，不是初音）
+记忆   memory/MemoryStore.kt  本机 SQLite，与 PC 的库**同构**
+同步   memory/SyncClient.kt   HTTP /sync/*，按「天」打包，UUID 认领 + LWW 合并
+渲染   不变：WebView + 本地模型缓存（PC 不可达时直接用缓存）
+```
+
+「设置 → 对话大脑」三档：
+
+| 档位 | 行为 |
+| --- | --- |
+| 只用手机（默认） | 直连云端；与 PC 只有 HTTP（模型 / 记忆 / 报告当前模型），**不连 WebSocket** |
+| 只用 PC | 和以前的瘦客户端一样，走 WebSocket |
+| 自动 | 填了 DeepSeek Key 就直连；没填但配过 PC 就走 PC |
+
+两个游标（拉 / 推）都存在手机这边，PC 侧不存状态；都回退 300 秒重扫以容忍时钟偏差，
+重复同步靠「时间戳相等保留本地」保证幂等。
 
 ---
 
@@ -97,6 +141,9 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 所以：**APK 里不含模型**，模型在首次连接时从**你自己的 PC** 同步到手机的私有目录
 （`filesDir/models/<模型id>/`）。传输只发生在你的 PC 和你自己的手机之间，不经过第三方。
 同理，仓库的 `.gitignore` 也把 `models/` 排除了。
+
+这也意味着**首次必须连一次 PC**（不需要同一局域网也能用 USB：`adb reverse`）。
+之后就完全靠本地缓存 —— PC 关机、换个网络都不影响。
 
 ### 两套模型，可以换（手机自己选）
 
@@ -120,14 +167,26 @@ PC 上保留了两个模型（`miku` 经典 / `miku_v5` 新模型），**手机�
 
 | 分区 | 内容 |
 | --- | --- |
-| Live2D 模型 | 选模型（就上面那条） |
+| Live2D 模型 | 选模型（就上面那条）。清单从 `GET /model/list` 取并落地，**独立模式也能换** |
 | 连接 PC | 改地址 / 改端口 / 重新连接。以前地址只在首次运行时能填，连上之后再也改不了 |
+| **对话大脑** | 只用手机（直连 API，默认）/ 只用 PC / 自动；并显示**实际生效**的是哪一档 |
+| **API 配置** | DeepSeek / MiniMax Key（脱敏占位，不重打不会覆盖）、音色 ID、模型；从剪贴板导入 |
+| **记忆同步** | 上次同步时间与结果、累计拉/推条数、本机记忆条数、「立即同步」 |
 | 开关 | 显示模型水印、视频对话（与界面上的快捷按钮是同一个开关） |
-| 状态 | 连接状态、PC 地址、当前模型、模型数量、贴图倍率、Cubism Core 版本、屏幕 |
+| 状态 | 对话通道、连接、PC 地址、当前模型、模型数量、贴图倍率、语音引擎、Core、屏幕 |
 
 > 顺手修掉一个坑：点「重新连接」到**同一个地址**时，`RemoteClient.connect()` 原本
 > 会直接 return，而页面已经乐观地显示成「连接中…」，于是永远卡在那一句。
 > 现在那条分支会补发一次真实的「已连接」。
+
+### 独立模式踩过的坑（都在真机上复现过）
+
+| 现象 | 原因 | 修法 |
+| --- | --- | --- |
+| PC 一关，模型就不渲染 | 模型同步挂在「连上 WebSocket」之后 | 模型同步与对话通道解耦；PC 不可达时退到本地缓存渲染 |
+| 设置面板说「还没收到模型清单」 | 清单只在 WS 的 `ready` 里下发，独立模式不连 WS | 改成从 `GET /model/list` 取并落地，离线时用本地缓存重算「可用」 |
+| 状态栏显示「已连接」但实际没连 | 同步完成后顺手推了一个假的 `connected` 状态 | 删掉；面板打开时自己重新读状态 |
+| 换模型要等很久才动 | 启动时的记忆同步和模型同步共用了一把锁 | 拆成两把 |
 
 ## 贴图显存：手机端的头号风险
 
@@ -320,9 +379,16 @@ PC 侧同一时刻的交互记录在 `data/remote.log`（对话 / 语音 / 转�
 
 未完成：
 
-- **真机验收**：这是唯一还差的验收项。需要你在 iQOO 上开 USB 调试并插线。
-  重点看两件事：① 384MB 贴图（6×4096²）在真机 GPU 上的实际表现 ——
-  模拟器是用 SwiftShader 绕开了 Chromium 的 GPU 黑名单，显存表现**不代表真机**；
-  ② 真实语音识别效果。
 - **模型表情切换的实机观感**：9 个表情已在内存里补进 model3.json 并默认应用了
   「水印」，但情绪→表情的映射（`EMOTION_EXPR`）只做过静态验证。
+
+### 独立运行（真机 iQOO V2452A，**PC 关机、无 adb reverse**）
+
+| 项 | 结果 |
+| --- | --- |
+| 模型渲染 | `modelReady=true`，状态栏「已就绪」（不是伪造的「已连接」） |
+| 模型清单 | 面板列出 `miku` / `miku_v5`（走 `GET /model/list`，不是 WS） |
+| 换模型 | 点「经典」→ 切成功并重载，`modelReady=true` |
+| 文字对话 | 真实回复（`[HAPPY] ミク现在就是元气满满…`） |
+| 语音 | MiniMax 合成 `format=wav`，22 字 → 4551ms |
+| 双端同步 | 两端各 286 条消息 / 5 条记忆，零重复，重复同步幂等（`tools/test_sync_e2e.py`） |
