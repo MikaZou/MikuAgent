@@ -150,6 +150,8 @@ class RemoteServer:
         app.router.add_get("/model/manifest", self._handle_manifest)
         app.router.add_get("/model/{model}/manifest", self._handle_manifest)
         app.router.add_get("/model/{tail:.*}", self._handle_model_file)
+        # 手机用 HTTP 报告自己换了模型（独立模式下它不连 WebSocket）
+        app.router.add_post("/model/active", self._handle_model_active)
         # 双端记忆同步（手机发起；PC 只负责给变动、收变动，不需要游标状态）
         app.router.add_get("/sync/state", self._handle_sync_state)
         app.router.add_get("/sync/changes", self._handle_sync_changes)
@@ -387,6 +389,30 @@ class RemoteServer:
     # 手机是**发起方**：它知道自己什么时候能连上（网络恢复、刚启动、聊完一轮）。
     # 所以 PC 侧没有游标状态，只有「给变动」和「收变动」两个动作 ——
     # 少一份状态就少一类「两端游标不一致」的故障。
+
+    async def _handle_model_active(self, request: web.Request) -> web.Response:
+        """手机通过 **HTTP** 报告它在用哪个模型。
+
+        独立模式下手机不连 WebSocket（省电、也没有僵尸重连），但 PC 的
+        设置窗口想显示「手机现在用哪个」，所以给它一个 HTTP 入口。
+        与 WS 的 `set_model` 一样：**只记录，不广播** —— 手机才是自己模型的主人。
+        """
+        try:
+            body = await request.json()
+        except Exception as exc:  # noqa: BLE001
+            return web.json_response({"error": f"不是合法 JSON：{exc}"}, status=400)
+        model_id = str((body or {}).get("id") or "")
+        if models_catalog.get(model_id) is None:
+            return web.json_response({"error": f"未知模型 {model_id}"}, status=404)
+        changed = models_catalog.select("phone", model_id)
+        _log(f"手机通过 HTTP 报告使用模型 {model_id}"
+             + ("（已记录）" if changed else "（与记录一致）"))
+        if self.on_phone_model is not None:
+            try:
+                self.on_phone_model(model_id)
+            except Exception as exc:  # noqa: BLE001
+                _log(f"on_phone_model 回调失败：{exc}")
+        return web.json_response({"ok": True, "changed": changed})
 
     async def _handle_sync_state(self, request: web.Request) -> web.Response:
         """探活用。手机先打这里，通了才谈同步。"""

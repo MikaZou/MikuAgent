@@ -227,14 +227,35 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
         Log.i(TAG, "模型目录 ${sync.modelDir(activeModelId).absolutePath}")
         webView.loadUrl(assets.indexUrl())
 
+        // 先把本地记着的模型清单装上：独立模式不连 WS，收不到 PC 的 `ready`，
+        // 没有这一句设置面板就会说「还没收到模型清单」而换不了模型。
+        cachedModelsJson()?.let {
+            lastModelsJson = it
+            Log.i(TAG, "用本地缓存的模型清单（独立模式也能换模型）")
+        }
+
         // 恢复上次的 PC 地址；模拟器上直接给出宿主机地址，省掉手输
         val saved = prefs.getString(KEY_HOST, null)
         val host = saved ?: defaultHostForPlatform()
-        if (host != null) {
-            Log.i(TAG, "自动连接 PC 地址 $host（来源：${if (saved != null) "上次保存" else "模拟器默认"}）")
-            startConnecting(host, prefs.getInt(KEY_PORT, DEFAULT_PORT))
-        } else {
-            Log.i(TAG, "尚未配置 PC 地址，等用户在界面上填")
+        val channel = pickBrain().kind
+        val port = prefs.getInt(KEY_PORT, DEFAULT_PORT)
+        when {
+            host == null -> {
+                // 连地址都没配过：仍然要把模型渲染出来（用本地缓存）。
+                // 新机器上缓存是空的，那时会明确提示「需要连一次 PC」。
+                Log.i(TAG, "尚未配置 PC 地址，直接用本地缓存渲染")
+                loadModelFromCacheOnly(reloadAfter = false)
+            }
+            channel == PcBrain.KIND -> {
+                Log.i(TAG, "对话走 PC，连接 $host:$port 并同步模型")
+                startConnecting(host, port)
+            }
+            else -> {
+                // 独立模式**不连 WebSocket**（它只服务于「对话走 PC」这条路），
+                // 但**模型还是要同步**：PC 不可达时 ModelSync 会退到本地缓存。
+                Log.i(TAG, "对话走手机本地（$channel），不连 WebSocket；只同步模型")
+                syncModel(host, port)
+            }
         }
 
         // 启动后跑一次记忆同步。延后几秒：模型同步与首屏渲染更该抢带宽，
@@ -288,8 +309,11 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
      *   会在 onPageAlive 里重新请求加载）。
      */
     private fun syncModel(host: String, port: Int, reloadAfter: Boolean = false) {
-        if (!memorySyncing.compareAndSet(false, true)) {
-            Log.i(TAG, "已有同步在进行，跳过本次触发")
+        // ⚠️ 这把锁是**模型同步**专用的。别和 memorySyncing 混用：两者是
+        // 完全不相干的动作（一个下贴图、一个同步聊天记录），共用一把锁会让
+        // 「启动时的记忆同步」把「模型加载」挡在门外（重构时真踩到过）。
+        if (!syncing.compareAndSet(false, true)) {
+            Log.i(TAG, "模型同步已在跑，跳过本次触发")
             return
         }
         scope.launch {
@@ -301,26 +325,105 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
                     }
                 }
                 when (result) {
-                    is ModelSync.Result.Ready -> {
-                        Log.i(TAG, "模型就绪：${result.modelId} 下载 ${result.downloaded} 个，跳过 ${result.skipped} 个")
-                        assets.activeModelId = result.modelId
-                        assets.profileJson = result.profileJson
-                        modelReady = true
-                        bridge.onStatus("model_ready", "模型已就绪")
-                        if (reloadAfter) {
-                            pageReady = false
-                            webView.reload()
-                        } else if (pageReady) {
-                            bridge.loadModel()
-                        }
-                    }
+                    is ModelSync.Result.Ready -> applyModelReady(result, reloadAfter)
                     is ModelSync.Result.Failed -> {
                         Log.e(TAG, "模型同步失败: ${result.message}")
-                        bridge.onError("模型同步失败：${result.message}")
+                        // 拿不到清单/下载失败，但本地缓存还在 —— 仍然要能渲染。
+                        // 「PC 不开也能用」这条要求就靠这里兜住。
+                        val cached = sync.useCacheOnly(modelId)
+                        if (cached is ModelSync.Result.Ready) {
+                            Log.w(TAG, "改用本地缓存渲染：${result.message}")
+                            applyModelReady(cached, reloadAfter)
+                        } else {
+                            bridge.onError("模型同步失败：${result.message}")
+                        }
                     }
                 }
             } finally {
-                memorySyncing.set(false)
+                syncing.set(false)
+
+            }
+        }
+    }
+
+    /**
+     * 模型**清单**也要落地。
+     *
+     * 清单原本只在 WS 的 `ready` 里拿到。独立模式不连 WS，于是设置面板会变成
+     * 「还没收到模型清单」—— 明明本地缓存着两套模型，却换不了。所以收到一次就存下来，
+     * 之后用**本地缓存**重算每个模型的 `present`（比猜靠谱）。
+     *
+     * 从没连过 PC 的新机上仍然是空的，这时换不了模型是事实（文件本来也得从 PC 来）。
+     */
+    private fun cachedModelsJson(): String? {
+        val raw = prefs.getString(KEY_MODELS_JSON, null) ?: return null
+        return try {
+            val arr = org.json.JSONArray(raw)
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                o.put("present", sync.isCached(o.optString("id")))
+            }
+            arr.toString()
+        } catch (e: Exception) {
+            Log.w(TAG, "本地模型清单坏了，忽略：${e.message}")
+            null
+        }
+    }
+
+    /** 模型可用之后的收尾（同步成功与「退到本地缓存」两条路共用）。 */
+    private fun applyModelReady(result: ModelSync.Result.Ready, reloadAfter: Boolean) {
+        Log.i(TAG, "模型就绪：${result.modelId} 下载 ${result.downloaded} 个，跳过 ${result.skipped} 个")
+        assets.activeModelId = result.modelId
+        assets.profileJson = result.profileJson
+        modelReady = true
+        bridge.onStatus("model_ready", "模型已就绪")
+        // 顺手把清单也拉一遍（独立模式不连 WS，清单只能从 HTTP 来）
+        refreshModelList()
+        if (reloadAfter) {
+            pageReady = false
+            webView.reload()
+        } else if (pageReady) {
+            bridge.loadModel()
+        }
+    }
+
+    /**
+     * 从 PC 拉一次可用模型清单并喂给页面。
+     *
+     * 独立模式（不连 WS）下这是**唯一**的清单来源；连了 WS 时它也只是一次
+     * 冗余的刷新，没有副作用。拿不到就保留上次记下的那份。
+     */
+    private fun refreshModelList() {
+        val host = prefs.getString(KEY_HOST, null)
+        if (host.isNullOrBlank()) return
+        val port = prefs.getInt(KEY_PORT, DEFAULT_PORT)
+        scope.launch {
+            val json = withContext(Dispatchers.IO) { sync.fetchModelList(host, port) }
+            if (!json.isNullOrBlank()) {
+                prefs.edit().putString(KEY_MODELS_JSON, json).apply()
+                lastModelsJson = json
+                if (pageReady) bridge.onModels(json, activeModelId)
+                Log.i(TAG, "模型清单已更新")
+            }
+        }
+    }
+
+    /**
+     * 完全不碰网络，直接用本地缓存里的模型。
+     *
+     * 「PC 不开也能用」的关键一环：手机要显示 Live2D，而模型文件在本地缓存里
+     * 已经有一份。只有在**从没同步过这个模型**的新机上才会失败 —— 那时给出
+     * 明确提示（需要连一次 PC），而不是白屏。
+     */
+    private fun loadModelFromCacheOnly(reloadAfter: Boolean) {
+        val modelId = activeModelId
+        scope.launch {
+            val result = withContext(Dispatchers.IO) { sync.useCacheOnly(modelId) }
+            if (result is ModelSync.Result.Ready) {
+                applyModelReady(result, reloadAfter)
+            } else {
+                Log.w(TAG, "本地没有 $modelId 的模型缓存")
+                bridge.onError("本地还没有「$modelId」的模型文件，需要连一次 PC 把它同步过来")
             }
         }
     }
@@ -337,8 +440,13 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
         assets.activeModelId = modelId
         prefs.edit().putString(KEY_MODEL, modelId).apply()
         modelReady = false
-        val host = prefs.getString(KEY_HOST, null) ?: return
-        syncModel(host, prefs.getInt(KEY_PORT, DEFAULT_PORT), reloadAfter = true)
+        val host = prefs.getString(KEY_HOST, null)
+        if (host.isNullOrBlank()) {
+            // 没配过 PC：本地缓存里有就能切，没有就明确说清楚
+            loadModelFromCacheOnly(reloadAfter = true)
+        } else {
+            syncModel(host, prefs.getInt(KEY_PORT, DEFAULT_PORT), reloadAfter = true)
+        }
     }
 
     private fun onRemoteEvent(e: RemoteClient.Event) {
@@ -346,6 +454,10 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
             is RemoteClient.Event.Ready -> {
                 bridge.onProvider(e.provider.toString())
                 lastModelsJson = e.modelsJson
+                // 存一份，供独立模式（不连 WS）时列模型用
+                if (!e.modelsJson.isNullOrBlank()) {
+                    prefs.edit().putString(KEY_MODELS_JSON, e.modelsJson).apply()
+                }
                 // 只取**可用清单**。`phone_model` 是 PC 那边记的一笔账，
                 // **不用来覆盖本机选择** —— 否则用户在手机设置里选的模型，
                 // 每次连上 PC 都会被重置回 PC 记着的那个。
@@ -450,8 +562,9 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
             }
             Log.i(TAG, "同步结果：$lastSyncText")
             memorySyncing.set(false)
-            // 记忆变了，页面上的条数要跟着更新
-            if (pageReady) bridge.onStatus(lastStatus?.first ?: "connected", lastStatus?.second ?: "")
+            // 不要在这里往页面推状态：`lastStatus` 可能压根是空的（独立模式不连
+            // WebSocket），那时冒充一个 "connected" 会让状态栏永远显示「已连接」。
+            // 面板本来就会在打开时自己重新读 deviceState()。
         }
     }
 
@@ -733,7 +846,24 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
         if (id.isBlank() || id == activeModelId) return
         Log.i(TAG, "手机设置里换模型 -> $id")
         switchModel(id, "手机设置")
-        remote.sendSetModel(id)
+        reportActiveModel(id)
+    }
+
+    /**
+     * 把「本机在用哪个模型」告诉 PC。
+     *
+     * 连了 WebSocket 就走 WS（老通道）；独立模式下没连 WS，走 HTTP。
+     * 两条路都只是**记录**，PC 不会广播回来。
+     */
+    private fun reportActiveModel(id: String) {
+        val host = prefs.getString(KEY_HOST, null)
+        if (host.isNullOrBlank()) return
+        if (remote.isConnected) {
+            remote.sendSetModel(id)
+            return
+        }
+        val port = prefs.getInt(KEY_PORT, DEFAULT_PORT)
+        scope.launch { withContext(Dispatchers.IO) { memorySync.reportActiveModel(host, port, id) } }
     }
 
     // 注意用块体而不是 `= remote.ping()`：ping() 返回 Boolean，
@@ -839,6 +969,9 @@ class MainActivity : AppCompatActivity(), Bridge.Actions {
         private const val KEY_HOST = "pc_host"
         private const val KEY_PORT = "pc_port"
         private const val KEY_MODEL = "model_id"
+
+        /** 上次从 PC 收到的模型清单（JSON）。独立模式下靠它列出模型。 */
+        private const val KEY_MODELS_JSON = "models_json"
 
         /**
          * 模拟器访问宿主机的固定地址；真机需要填 PC 的局域网 IP

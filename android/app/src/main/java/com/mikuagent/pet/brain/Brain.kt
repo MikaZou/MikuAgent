@@ -133,7 +133,7 @@ class LocalBrain(
  */
 class PcBrain(private val remote: RemoteClient) : Brain {
 
-    override val kind: String = "pc"
+    override val kind: String = KIND
 
     /** PC 会在 `reply` 之后自己补一条 `speech`。 */
     override val deliversSpeech: Boolean = true
@@ -150,6 +150,11 @@ class PcBrain(private val remote: RemoteClient) : Brain {
     }
 
     override fun cancel() = Unit
+
+    companion object {
+        /** 与 [LocalBrain.kind] 一起用于「要不要连 WebSocket」的判断。 */
+        const val KIND = "pc"
+    }
 }
 
 /** 按当前模式挑一个通道。 */

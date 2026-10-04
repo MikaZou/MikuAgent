@@ -168,3 +168,43 @@ HAS_API_KEY = bool(DEEPSEEK_API_KEY) and DEEPSEEK_API_KEY != "sk-xxxxxxxx"
 # 并且可以在设置窗口里随时切换（见 docs/TECHNICAL.md §5.11）。
 _remote_model_dir = os.getenv("REMOTE_MODEL_DIR", "").strip()
 REMOTE_MODEL_DIR = resolve_path(_remote_model_dir) if _remote_model_dir else MODEL_PATH.parent
+
+
+# ===== 给手机端导出 API 配置 =====
+#
+# 手机端能独立运行之后需要自己的 DeepSeek / MiniMax 凭据。手打一串 40 多位的 Key
+# 很容易出错，所以 PC 设置窗口提供一个「复制 API 配置」按钮：把下面这些字段
+# 打包成 JSON 放进剪贴板，手机端「从剪贴板导入」直接吃。
+#
+# **不用「让 PC 开个端点吐 Key」**：局域网服务没有任何鉴权，把一个能花钱的凭据
+# 挂在上面不合适。剪贴板通道零新增攻击面，代价只是要把文本从 PC 传到手机。
+API_CONFIG_FIELDS = (
+    "DEEPSEEK_API_KEY",
+    "DEEPSEEK_BASE_URL",
+    "DEEPSEEK_MODEL",
+    "DEEPSEEK_TEMPERATURE",
+    "DEEPSEEK_THINKING",
+    "MINIMAX_API_KEY",
+    "MINIMAX_BASE_URL",
+    "MINIMAX_TTS_MODEL",
+    "MINIMAX_VOICE_ID",
+    "MINIMAX_SPEED",
+    "MINIMAX_ASR_MODEL",
+    "STT_LANGUAGE",
+    "VISION_DETAIL",
+    "MAX_HISTORY_MESSAGES",
+)
+
+
+def api_config_payload() -> dict:
+    """打包给手机端的配置。
+
+    只带**非空**字段：手机端对「字段在、值为空串」的语义是「清空」，
+    而 `.env` 里有大量注释掉/留空的键 —— 不过滤的话，手机上刚填好的 Key
+    会被下一次导入抹掉。
+    """
+    from envfile import read_env
+
+    env = read_env()
+    return {k: env[k].strip() for k in API_CONFIG_FIELDS if env.get(k, "").strip()}
+

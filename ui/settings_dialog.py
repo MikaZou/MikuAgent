@@ -17,6 +17,8 @@ from __future__ import annotations
 
 from typing import Optional
 
+import json
+
 import models_catalog
 from PySide6.QtCore import QSettings, Qt, Signal
 from PySide6.QtWidgets import (
@@ -243,6 +245,15 @@ class SettingsDialog(QDialog):
             "重新打开首次设置向导：语音引擎（本地/云端）、API Key、"
             "视频对话、手机端。保存后立即生效，无需重启。"
         )
+        self.btn_copy_cfg = QPushButton("📋 复制 API 配置")
+        self.btn_copy_cfg.setObjectName("ghost")
+        self.btn_copy_cfg.setToolTip(
+            "把 DeepSeek / MiniMax 的 Key 与音色设置打包成一段文本复制到剪贴板。\n"
+            "手机端「设置 → API 配置 → 从剪贴板导入」直接粘即可 —— \n"
+            "手机要独立运行就得有自己的 Key，手打 40 多位很容易出错。\n"
+            "（不用「让 PC 开个端点吐 Key」：局域网服务没有鉴权，那样不合适）"
+        )
+        self.btn_copy_cfg.clicked.connect(self._on_copy_api_config)
         self.btn_quit = QPushButton("完全退出 MikuAgent")
         self.btn_quit.setObjectName("danger")
         self.btn_quit.setToolTip(
@@ -252,6 +263,7 @@ class SettingsDialog(QDialog):
         bottom = QHBoxLayout()
         bottom.addWidget(self.btn_toggle_pet)
         bottom.addWidget(reconf_btn)
+        bottom.addWidget(self.btn_copy_cfg)
         bottom.addStretch(1)
         bottom.addWidget(self.btn_quit)
         root.addLayout(bottom)
@@ -371,6 +383,33 @@ class SettingsDialog(QDialog):
 
     def _on_save_nickname(self) -> None:
         self.nickname_saved.emit(self._nickname.text().strip())
+
+    def _on_copy_api_config(self) -> None:
+        """把 API 配置放进剪贴板，供手机端粘贴导入。
+
+        只带非空字段（理由见 config.api_config_payload）；缺 Key 时明确提示，
+        而不是复制一段空 JSON 让用户到手机上才发现没用。
+        """
+        try:
+            payload = config.api_config_payload()
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "复制失败", f"读取 .env 失败：{exc}")
+            return
+        if not payload:
+            QMessageBox.warning(
+                self, "没有可复制的配置",
+                "`.env` 里没有填 API Key。先点「⚙ 修改配置」把 Key 填上，再回来复制。",
+            )
+            return
+        text = json.dumps(payload, ensure_ascii=False)
+        QApplication.clipboard().setText(text)
+        keys = "、".join(sorted(payload))
+        QMessageBox.information(
+            self, "已复制",
+            f"已把 {len(payload)} 个字段复制到剪贴板：\n{keys}\n\n"
+            "在手机上打开「设置 → API 配置 → 从剪贴板导入」即可。\n"
+            "（这段文本含 API Key，别发到公开的地方）",
+        )
 
     def _confirm_quit(self) -> None:
         """二次确认。

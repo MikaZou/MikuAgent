@@ -77,6 +77,13 @@
     flex: 1; min-width: 0; border: 1px solid #2b3a42; border-radius: 8px;
     padding: 9px 10px; font-size: 14px; background: #0f161c; color: #e8f4f2; outline: none;
   }
+  /* 粘贴 PC 那段 API 配置用。单行 input 放不下 JSON，但也不该占满屏幕 */
+  #settings textarea {
+    width: 100%; box-sizing: border-box; margin-top: 8px; resize: vertical;
+    border: 1px solid #2b3a42; border-radius: 8px; padding: 9px 10px;
+    font-size: 12px; line-height: 1.5; background: #0f161c; color: #e8f4f2;
+    outline: none; font-family: inherit;
+  }
   #settings .wide {
     width: 100%; margin-top: 8px; border: none; border-radius: 10px;
     padding: 11px; font-size: 14px; font-weight: 600;
@@ -212,8 +219,38 @@
         <div class="row"><label>端口</label>
           <input id="sport" inputmode="numeric" placeholder="8765" autocomplete="off"></div>
         <button class="wide" id="sconnect">重新连接</button>
-        <p class="tip">Miku 的大脑跑在 PC 上。连不上时先确认 PC 端的 MikuAgent 开着，
-          而且手机和 PC 在同一个网络里（模拟器填 10.0.2.2）。</p>
+        <p class="tip">只有「对话大脑 = 只用 PC」时才需要连这里。独立模式下与 PC
+          的往来只走 HTTP（记忆同步、模型报告），不会占着一条长连接。</p>
+      </section>
+
+      <section>
+        <h3>对话大脑</h3>
+        <div id="blist"></div>
+        <p class="tip" id="btip"></p>
+      </section>
+
+      <section>
+        <h3>API 配置</h3>
+        <div class="row"><label>DeepSeek</label>
+          <input id="sdk" type="password" placeholder="sk-…" autocomplete="off"></div>
+        <div class="row"><label>MiniMax</label>
+          <input id="smm" type="password" placeholder="eyJ…" autocomplete="off"></div>
+        <div class="row"><label>音色 ID</label>
+          <input id="svoice" placeholder="克隆音色 ID（留空用默认少女音）" autocomplete="off"></div>
+        <div class="row"><label>模型</label>
+          <input id="sdsmodel" placeholder="deepseek-flash" autocomplete="off"></div>
+        <button class="wide" id="ssavecfg">保存 API 配置</button>
+        <textarea id="scfgpaste" rows="2" placeholder="或把 PC「设置 → 📋 复制 API 配置」得到的整段文本粘在这里"></textarea>
+        <button class="wide" id="simportcfg">从粘贴内容导入</button>
+        <p class="tip" id="scfgtip"></p>
+      </section>
+
+      <section>
+        <h3>记忆同步</h3>
+        <div id="ssync"></div>
+        <button class="wide" id="ssyncnow">立即同步</button>
+        <p class="tip">没连 PC 时聊天记录只存在手机上（这时候也能正常聊）；
+          连上之后两端的会话、消息与长期记忆会自动合并，重复同步不会产生重复。</p>
       </section>
 
       <section>
@@ -847,6 +884,10 @@ function syncSettingsUI() {
   $("svideo").checked = !!videoMode;
   settingsLoading = false;
 
+  renderBrainList(st);
+  renderApiConfig();
+  renderSyncInfo(st);
+
   // Core / 屏幕只有页面自己知道（原生侧看不到 canvas 这些）
   let coreVer = "-";
   try {
@@ -855,7 +896,8 @@ function syncSettingsUI() {
   } catch (e) { /* Core 还没加载 */ }
 
   const rows = [
-    ["连接", st.connected ? "已连接" : (st.status || "未连接")],
+    ["对话通道", (st.brainKind === "pc" ? "PC" : "手机直连") + "（" + (st.brainMode || "auto") + "）"],
+    ["连接", st.connected ? "已连接" : (st.brainKind === "pc" ? (st.status || "未连接") : "不需要（独立运行）")],
     ["PC 地址", (st.host || "未设置") + ":" + (st.port || "?")],
     ["当前模型", currentModel || "未就绪"],
     ["模型数量", MODELS.length
@@ -863,6 +905,7 @@ function syncSettingsUI() {
         : "未收到清单"],
     ["贴图", st.textureScale && st.textureScale < 0.999
         ? ("已降到 " + Math.round(st.textureScale * 100) + "%（省显存）") : "原尺寸 4096"],
+    ["语音", (st.tts && st.tts.status) || "-"],
     ["Core", coreVer],
     ["屏幕", innerWidth + "x" + innerHeight + " @" + (window.devicePixelRatio || 1) + "x"],
   ];
@@ -872,6 +915,140 @@ function syncSettingsUI() {
 }
 
 let settingsLoading = false;
+
+// ---------------------------------------------------- 对话大脑 / API / 同步
+
+/** 三种对话通道。说明文案要讲清「谁会回答」。 */
+const BRAIN_MODES = [
+  ["api", "只用手机（直连 API）", "手机自己调 DeepSeek / MiniMax —— PC 可以完全不开"],
+  ["pc", "只用 PC", "和以前一样，AI 与语音都跑在电脑上（需要连上 PC）"],
+  ["auto", "自动", "填了 DeepSeek Key 就直连；没填但配过 PC 就走 PC"],
+];
+
+function renderBrainList(st) {
+  const box = $("blist");
+  if (!box) return;
+  const cur = st.brainMode || "auto";
+  box.innerHTML = "";
+  BRAIN_MODES.forEach(([id, name, note]) => {
+    const el = document.createElement("div");
+    el.className = "mopt" + (id === cur ? " on" : "");
+    el.dataset.id = id;
+    const radio = document.createElement("div");
+    radio.className = "radio";
+    const txt = document.createElement("div");
+    const nm = document.createElement("div");
+    nm.className = "mname";
+    nm.textContent = name;
+    const nt = document.createElement("div");
+    nt.className = "mnote";
+    nt.textContent = note;
+    txt.appendChild(nm);
+    txt.appendChild(nt);
+    el.appendChild(radio);
+    el.appendChild(txt);
+    // 选中的不再发请求（原生侧会记一条日志，看不出区别但没必要）
+    el.onclick = () => {
+      if (id === cur) return;
+      native && native.setBrainMode && native.setBrainMode(id);
+      closeSettings();
+      showBubble("对话已切到「" + name + "」", "NORMAL");
+    };
+    box.appendChild(el);
+  });
+
+  // 实际生效的是哪一条 —— auto 会按有没有 Key / 有没有 PC 落到具体一档
+  const kind = st.brainKind === "pc" ? "PC" : "手机直连";
+  const keyState = st.hasDeepseekKey ? "已配 Key" : "未配 Key（会用演示模式兜底）";
+  $("btip").textContent = "当前实际用：" + kind + "（" + keyState + "）。"
+    + (cur === "auto" ? "选「自动」时按上面这条规则决定。" : "");
+}
+
+function renderApiConfig() {
+  let cfg = {};
+  try {
+    cfg = JSON.parse((native && native.apiConfig && native.apiConfig()) || "{}");
+  } catch (e) { cfg = {}; }
+  // Key 只回脱敏值，所以放 placeholder —— 用户不重打就不会覆盖
+  $("sdk").placeholder = cfg.deepseekKey || "sk-…（未配置）";
+  $("smm").placeholder = cfg.minimaxKey || "eyJ…（未配置）";
+  $("svoice").value = cfg.minimaxVoiceId || "";
+  $("sdsmodel").value = cfg.deepseekModel || "";
+  $("scfgtip").textContent = "手机上要直连就得有自己的 Key（PC 设置窗口有「📋 复制 API 配置」）。"
+    + "Key 存在"
+    + (cfg.secretsEncrypted ? "**加密**存储" : "应用私有目录（本机加密不可用，已退回普通存储）")
+    + "里；这里是脱敏显示，不重打就不会被清空。";
+}
+
+function renderSyncInfo(st) {
+  const s = (st && st.sync) || {};
+  const when = s.lastSyncAt ? new Date(s.lastSyncAt * 1000).toLocaleString() : "还没同步过";
+  const rows = [
+    ["上次同步", when],
+    ["结果", s.lastError ? ("失败：" + s.lastError) : (s.text || "-")],
+    ["累计", "拉取 " + (s.lastPullCount || 0) + " / 推送 " + (s.lastPushCount || 0)],
+    ["本机记忆", (st && st.memory)
+      ? (st.memory.sessions + " 会话 / " + st.memory.messages + " 消息 / " + st.memory.memories + " 记忆")
+      : "-"],
+  ];
+  $("ssync").innerHTML = rows.map(([k, v]) =>
+    '<div class="kv"><b>' + k + '</b><span>' + String(v)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;") + '</span></div>').join("");
+}
+
+function deviceState() {
+  try {
+    return JSON.parse((native && native.deviceState && native.deviceState()) || "{}");
+  } catch (e) { return {}; }
+}
+
+/** 「立即同步」：按完等它跑完再刷新面板（没有同步完成事件，靠 lastSyncAt 变化）。 */
+function syncNow() {
+  const before = (deviceState().sync || {}).lastSyncAt || 0;
+  const msg = (native && native.syncNow && native.syncNow()) || "";
+  if (msg) showBubble(msg, "NORMAL");
+  let tries = 0;
+  const timer = setInterval(() => {
+    tries++;
+    const st = deviceState();
+    const now = (st.sync || {}).lastSyncAt || 0;
+    if (now !== before || tries > 20) {
+      clearInterval(timer);
+      renderSyncInfo(st);
+      if (now !== before) showBubble("同步好啦～", "HAPPY");
+    }
+  }, 1500);
+}
+
+$("ssavecfg").onclick = () => {
+  const body = {};
+  const dk = $("sdk").value.trim();
+  const mk = $("smm").value.trim();
+  // 只送「用户真的填了」的字段：空值在原生侧等于「清空」
+  if (dk) body.DEEPSEEK_API_KEY = dk;
+  if (mk) body.MINIMAX_API_KEY = mk;
+  if ($("svoice").value.trim()) body.MINIMAX_VOICE_ID = $("svoice").value.trim();
+  if ($("sdsmodel").value.trim()) body.DEEPSEEK_MODEL = $("sdsmodel").value.trim();
+  if (!Object.keys(body).length) { showBubble("什么都没填哦", "SAD"); return; }
+  const used = native && native.saveApiConfig && native.saveApiConfig(JSON.stringify(body));
+  if (String(used).startsWith("ERR")) { showBubble("保存失败：" + used, "SAD"); return; }
+  $("sdk").value = "";
+  $("smm").value = "";
+  renderApiConfig();
+  showBubble("API 配置已保存☆", "HAPPY");
+};
+
+$("simportcfg").onclick = () => {
+  const text = $("scfgpaste").value.trim();
+  if (!text) { showBubble("先把 PC 那段配置粘进来～", "SAD"); return; }
+  const used = native && native.saveApiConfig && native.saveApiConfig(text);
+  if (String(used).startsWith("ERR")) { showBubble("导入失败：" + used, "SAD"); return; }
+  $("scfgpaste").value = "";
+  renderApiConfig();
+  showBubble("导入 " + String(used).split(",").length + " 个字段", "HAPPY");
+};
+
+$("ssyncnow").onclick = () => syncNow();
 
 $("gear").onclick = openSettings;
 $("sclose").onclick = closeSettings;

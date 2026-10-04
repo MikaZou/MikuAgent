@@ -182,6 +182,28 @@ class ModelSync(private val context: Context) {
     }
 
     /**
+     * **完全不联网**，直接用本地缓存里的这个模型。
+     *
+     * 「PC 不开也能用」的关键：手机要显示 Live2D，而模型文件在缓存里已经有一份。
+     * 只有在从没同步过这个模型的新机上才会失败 —— 那时上层给明确提示，
+     * 而不是让页面白屏。
+     */
+    fun useCacheOnly(modelId: String): Result {
+        val dir = modelDir(modelId)
+        if (!hasModelJson(dir)) {
+            return Result.Failed("本地没有 ${modelId} 的缓存")
+        }
+        return Result.Ready(dir, 0, -1, modelId, readCachedProfile(dir))
+    }
+
+    /**
+     * 本地是否已经有这个模型（用来给设置面板标「可用/不可用」）。
+     *
+     * 独立模式下拿不到 PC 的清单，只能看本地有什么 —— 这比「猜」靠谱。
+     */
+    fun isCached(modelId: String): Boolean = hasModelJson(modelDir(modelId))
+
+    /**
      * 外部（adb push）放模型时用的目录名。
      *
      * 单独抽出来而不是直接引用 AssetServer：ModelSync 在 model/ 包里，
@@ -217,6 +239,27 @@ class ModelSync(private val context: Context) {
         } catch (e: Exception) {
             Log.w(TAG, "写画像缓存失败：${e.message}")
         }
+    }
+
+    /**
+     * 从 PC 直接取**可用模型清单**（`GET /model/list`），返回 models 数组的 JSON 串。
+     *
+     * 为什么要专门走 HTTP：清单原本只在 WebSocket 的 `ready` 里下发，而独立模式
+     * （对话走手机本地）根本不连 WS —— 结果设置面板会说「还没收到模型清单」，
+     * 明明本地缓存着两套模型却换不了。清单本来就是个纯 HTTP 资源。
+     *
+     * 失败返回 null，上层保留上次记下的那份。
+     */
+    fun fetchModelList(host: String, port: Int): String? = try {
+        val req = Request.Builder().url("http://$host:$port/model/list").build()
+        client.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}")
+            val root = JSONObject(resp.body?.string() ?: "{}")
+            root.optJSONArray("models")?.toString()
+        }
+    } catch (e: Exception) {
+        Log.w(TAG, "取模型清单失败（保留本地那份）：${e.message}")
+        null
     }
 
     private fun fetchManifest(url: String): Manifest {

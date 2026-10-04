@@ -123,6 +123,22 @@ class SyncClient(private val store: MemoryStore) {
         Result.Failed(msg)
     }
 
+    /**
+     * 告诉 PC「本机现在用哪个 Live2D 模型」。
+     *
+     * 放在这个类里是因为它同样是「跟 PC 的 HTTP 通信」，共用同一个客户端与超时；
+     * 独立模式下手机不连 WebSocket，所以原来的 WS `set_model` 通道用不了。
+     * 语义与 WS 那条一致：**只记录，不广播** —— 手机才是自己模型的主人。
+     */
+    fun reportActiveModel(host: String, port: Int, modelId: String): Boolean = try {
+        post("http://$host:$port/model/active", JSONObject().put("id", modelId))
+        Log.i(TAG, "已通过 HTTP 向 PC 报告模型 $modelId")
+        true
+    } catch (e: Exception) {
+        Log.w(TAG, "报告模型失败（不影响本地切换）：${e.message}")
+        false
+    }
+
     // -------------------------------------------------------------- 内部
 
     private class Page(val now: Double, val hasMore: Boolean, val bundle: SyncBundle)
