@@ -116,6 +116,10 @@ class Live2DView(QOpenGLWidget):
         # 自动取景状态
         self._fit_rect: Optional[QRect] = None
         self._calibrating = False
+        # 取景用的离屏 FBO（绝不用控件自己的 FBO 画中间帧，见 _probe_box）
+        self._probe_fbo = 0
+        self._probe_tex = 0
+        self._probe_size = (0, 0)
         # 最近一次实测的美术包围盒 [left, top, right, bottom]（逻辑像素）。
         # 外层用它把角标按钮贴到初音头顶上方。
         self.model_box: Optional[list[float]] = None
@@ -161,6 +165,16 @@ class Live2DView(QOpenGLWidget):
             self.model.LoadModelJson(str(self.model_path))
             self.model.SetAutoBlinkEnable(True)
             self.model.SetAutoBreathEnable(True)
+            # ⚠️ 必须**立刻** Resize 一次，不能等 resizeGL。
+            #
+            # Resize 设的是这个模型自己的投影矩阵。首次加载时 Qt 会在
+            # initializeGL 之后调一次 resizeGL，所以看起来「不用管」；
+            # 但**换模型时不会再有 resizeGL** —— 新模型就一直停在默认投影上，
+            # 表现为画出来只有右上角一小块，而且自动取景会拿这个错误的投影
+            # 去反推，算出偏小/比例不对的 scale（用户报的「换模型后模型变瘦了」
+            # 就是这个）。实测：直接加载 160x345，换过之后 82x121。
+            self.model.Resize(int(self.width() * self._dpr),
+                              int(self.height() * self._dpr))
             self._apply_framing()
         except Exception as exc:  # noqa: BLE001
             # 模型/驱动有问题时不要让整个程序崩掉：置空模型并通知上层回退到静态立绘
@@ -307,26 +321,44 @@ class Live2DView(QOpenGLWidget):
 
         失败时不会留下「半个模型」：先把旧的收干净，再装新的；
         新的装不上就置空并让上层回退到静态立绘。
+
+        ⚠️ 整个过程必须**持有当前 GL 上下文**（makeCurrent）。
+
+        首次加载发生在 `initializeGL` 里，那时上下文天然是当前的；而换模型是从
+        按钮回调里进来的，上下文不是当前的 —— `LoadModelJson` / `CreateRenderer`
+        / `DestroyRenderer` 都会真的发 GL 调用，脱离上下文建出来的渲染器是坏的，
+        画出来只有角落一小块，而且自动取景会拿这份坏投影去反推，算出偏小的 scale
+        （用户报的「换模型之后模型变瘦/跑到角落」就是这个）。
+        实测：直接加载 160x345，换过之后 82x121。
         """
         if model_id == self.model_id and self.model is not None:
             return True
         print(f"[Live2D] 切换模型：{self.model_id} → {model_id}")
         self.stop_lipsync()
-        self._unload_model()
 
-        self.model_id = model_id
-        self.model_path = models_catalog.model_json_path(model_id)
-        self.profile = dict(models_catalog.resolve(model_id).get("profile") or {})
-        self._wm_param = self.profile.get("watermark_param")
-        self.idle_group = "Idle"
-        self._tilt_target = 0.0
-        self._tilt_now = 0.0
-        self._played_any = False
-        self.framing_scale = 1.0
-        self.framing_offset = (0.0, 0.0)
-        self._fit_rect = None
+        self.makeCurrent()
+        try:
+            self._unload_model()
 
-        ok = self._load_model()
+            self.model_id = model_id
+            self.model_path = models_catalog.model_json_path(model_id)
+            self.profile = dict(models_catalog.resolve(model_id).get("profile") or {})
+            self._wm_param = self.profile.get("watermark_param")
+            self.idle_group = "Idle"
+            self._tilt_target = 0.0
+            self._tilt_now = 0.0
+            self._played_any = False
+            # 待机计时也要重置：不然换过来之后要等上一个模型留下的间隔
+            # （最多 7 秒）才会动，看着像「换模型后僵住了」。
+            self._next_idle_at = 0.0
+            self.framing_scale = 1.0
+            self.framing_offset = (0.0, 0.0)
+            self._fit_rect = None
+
+            ok = self._load_model()
+        finally:
+            self.doneCurrent()
+
         if ok and self._fit_rect is not None:
             # 换模型后重新拟合：每个模型的美术范围完全不同
             self.auto_frame(self._fit_rect)
@@ -377,9 +409,11 @@ class Live2DView(QOpenGLWidget):
     def _probe_box(self) -> Optional[list[float]]:
         """自己画一帧并读回 alpha 包围盒（逻辑像素，原点左上）。
 
-        为什么不用 grabFramebuffer()：那个会走 Qt 的合成路径，在取景过程中
-        连续调用代价太高；直接 makeCurrent + Draw + glReadPixels 与 paintGL
-        走的是同一条路，量出来的就是屏幕上的真实位置。
+        为什么不直接画进控件自己的 framebuffer：取景要连画十几帧，而这些绘制
+        发生在 paintGL **之外**。控件的 FBO 是会被合成到屏幕上的 —— 在里面留下
+        的中间帧会被当成画面显示出来，用户看到的就是「模型重影/两个分身」
+        （实测截图确认：屏幕上两个错位的 Miku，而 grabFramebuffer 是干净的）。
+        所以这里自己建一个离屏 FBO，量完就还回控件的默认 FBO。
         """
         if self.model is None:
             return None
@@ -389,10 +423,17 @@ class Live2DView(QOpenGLWidget):
             return None
         self.makeCurrent()
         try:
+            fbo, tex = self._ensure_probe_fbo(w, h)
+            if fbo == 0:
+                return None
+            gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, fbo)
+            gl.glViewport(0, 0, w, h)
             live2d.clearBuffer(0.0, 0.0, 0.0, 0.0)
             self.model.Update()
             self.model.Draw()
             raw = gl.glReadPixels(0, 0, w, h, gl.GL_RGBA, gl.GL_UNSIGNED_BYTE)
+            # 立刻还回控件自己的 FBO，别把离屏内容留给后续的 paintGL
+            gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, self.defaultFramebufferObject())
         except Exception:  # noqa: BLE001
             return None
         finally:
@@ -415,6 +456,43 @@ class Live2DView(QOpenGLWidget):
             int(cols.max()) / dpr,
             (h - 1 - int(rows.min())) / dpr,
         ]
+
+    def _ensure_probe_fbo(self, w: int, h: int) -> tuple[int, int]:
+        """按需创建/复用离屏 FBO（尺寸变了就重建）。返回 (fbo, texture)，失败为 (0, 0)。"""
+        if self._probe_fbo and self._probe_size == (w, h):
+            return self._probe_fbo, self._probe_tex
+        self._release_probe_fbo()
+        tex = int(gl.glGenTextures(1))
+        gl.glBindTexture(gl.GL_TEXTURE_2D, tex)
+        gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGBA8, w, h, 0,
+                        gl.GL_RGBA, gl.GL_UNSIGNED_BYTE, None)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
+        fbo = int(gl.glGenFramebuffers(1))
+        gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, fbo)
+        gl.glFramebufferTexture2D(gl.GL_FRAMEBUFFER, gl.GL_COLOR_ATTACHMENT0,
+                                  gl.GL_TEXTURE_2D, tex, 0)
+        status = gl.glCheckFramebufferStatus(gl.GL_FRAMEBUFFER)
+        if status != gl.GL_FRAMEBUFFER_COMPLETE:
+            print(f"[Live2D] 离屏 FBO 不完整（status={status}），取景退回控件 FBO")
+            gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, self.defaultFramebufferObject())
+            gl.glDeleteFramebuffers(1, [fbo])
+            gl.glDeleteTextures([tex])
+            return 0, 0
+        gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, self.defaultFramebufferObject())
+        self._probe_fbo, self._probe_tex, self._probe_size = fbo, tex, (w, h)
+        return fbo, tex
+
+    def _release_probe_fbo(self) -> None:
+        if self._probe_fbo:
+            try:
+                gl.glDeleteFramebuffers(1, [self._probe_fbo])
+                gl.glDeleteTextures([self._probe_tex])
+            except Exception:  # noqa: BLE001
+                pass
+        self._probe_fbo = 0
+        self._probe_tex = 0
+        self._probe_size = (0, 0)
 
     @staticmethod
     def _box_w(box) -> float:
@@ -847,5 +925,15 @@ class Live2DView(QOpenGLWidget):
 
     # ------------------------------------------------------------------ 清理
     def shutdown(self) -> None:
+        """收掉渲染。**必须在 GL 上下文当前时做**（DestroyRenderer 会发 GL 调用）。"""
         self.stop_lipsync()
-        self._unload_model()
+        try:
+            self.makeCurrent()
+            try:
+                self._release_probe_fbo()
+                self._unload_model()
+            finally:
+                self.doneCurrent()
+        except Exception:  # noqa: BLE001
+            # 窗口可能已经销毁、上下文拿不到了；这时交给进程退出时回收
+            self.model = None

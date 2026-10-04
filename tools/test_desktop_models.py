@@ -1,7 +1,9 @@
 """回归：桌面端两个模型都渲染得出来，且自动取景把它们放进安全带里。
 
 为什么必须是**真 GL 窗口**跑：取景是靠读 framebuffer 的 alpha 实测的，
-offscreen 拿不到真实读数；而且「先加载 A 再换 B」这类问题只在真渲染器上复现。
+offscreen 拿不到真实读数；而且「先加载 A 再换 B」这类问题只在真渲染器上复现
+（实测踩到：换模型时 LoadModelJson 跑在没有当前 GL 上下文的情况下，
+新模型投影坏掉，取景只能纵向填满、横向只剩 1/3）。
 
 用法：.venv\\Scripts\\python.exe tools\\test_desktop_models.py
 """
@@ -110,7 +112,9 @@ def main() -> int:
         # 待机调度必须能真的转起来。判据是「有没有真的播过一个动作」——
         # 不能只看 IsMotionFinished()：刚加载的模型这个接口返回 False
         # （动作管理器还没启动过），照字面理解就是「永远在忙」。
-        pump(app, 4.0)
+        deadline = time.time() + 8.0
+        while time.time() < deadline and not getattr(view, "_played_any", False):
+            pump(app, 0.25)
         check(f"{model_id} 待机动作真的播起来了", bool(getattr(view, "_played_any", False)),
               f"_played_any={getattr(view, '_played_any', None)}")
 
@@ -131,12 +135,29 @@ def main() -> int:
             check(f"{model_id} 落在安全带内（±{slack}px）", inside,
                   f"box={[round(v) for v in box]} avail="
                   f"[{AVAIL.left()},{AVAIL.top()},{AVAIL.right()},{AVAIL.bottom()}]")
+
             # 逼近程度：要么横向填满，要么纵向填满
             fill_w = (box[2] - box[0]) / AVAIL.width()
             fill_h = (box[3] - box[1]) / AVAIL.height()
             check(f"{model_id} 填满安全带（宽或高 ≥ 90%）",
                   max(fill_w, fill_h) >= 0.90,
                   f"fill_w={fill_w:.2f} fill_h={fill_h:.2f}")
+
+            # 长宽比不能离谱地窄。
+            #
+            # 这条是补上的：之前的断言只看「落在安全带内 + 填满一个方向」，
+            # 而漏掉了一个真 bug —— 换模型时 LoadModelJson / CreateRenderer
+            # 跑在**没有当前 GL 上下文**的情况下，新模型的投影是坏的，
+            # 自动取景只能让它纵向填满、横向却只剩应有的 1/3
+            # （实测：直接加载 160x344，换过之后 63x346 = 长宽比 0.18）。
+            # 看起来就是「模型变瘦了」，而上面两条断言全都会通过。
+            #
+            # 阈值取 0.30 而不是精确比对：模型一直在播待机动作，同一个模型不同
+            # 瞬间的包围盒长宽比本身就在 0.40~0.53 之间晃（实测），
+            # 精确比对会变成随机失败；0.30 能稳稳分开「正常」与「坏掉的 0.18」。
+            aspect = (box[2] - box[0]) / max(1.0, box[3] - box[1])
+            check(f"{model_id} 长宽比正常（>0.30；坏掉时约 0.18）", aspect > 0.30,
+                  f"aspect={aspect:.3f}")
 
         # 水印：新模型有 Param137，默认应当被隐藏
         if model_id == "miku_v5":
